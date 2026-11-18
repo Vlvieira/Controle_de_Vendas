@@ -43,6 +43,14 @@ function formatarPagamentoExibicao(pagamento) {
   return pagamento === 'A Prazo / Fiado' ? 'A Prazo' : (pagamento || '-');
 }
 
+function normalizarStatusPedido(status) {
+  return String(status || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
 let filtroAtual = 'tudo';
 let dataInicioCustom = '';
 let dataFimCustom = '';
@@ -93,7 +101,6 @@ export const DashboardModule = {
       return true;
     });
 
-    // Faturamento efetivado vs Aguardando pagamento (A Prazo)
     const vendasAguardandoPgto = vendasFiltradas.filter(
       v => (v.status === 'Aguardando pagamento' || v.pagamento === 'A Prazo' || v.pagamento === 'A Prazo / Fiado') && !v.quitado && v.status !== 'Concluída'
     );
@@ -115,49 +122,62 @@ export const DashboardModule = {
 
     const qtdVencidasNoPeriodo = vendasAguardandoPgto.filter(v => verificarVendaVencida(v)).length;
 
-    // Monta as linhas detalhadas para o pop-up de valores a receber
+    const linhasAguardandoHtml = [...vendasAguardandoPgto]
+      .sort((a, b) => (a.dataVencimento || '').localeCompare(b.dataVencimento || ''))
+      .map(v => {
+        const vencida = verificarVendaVencida(v);
+        const valorBase = Number(v.valorOriginal ?? v.total ?? 0);
+        const valorComMulta = vencida ? valorBase * 1.01 : valorBase;
+        const vencTexto = v.dataVencimento ? formatarDataBR(v.dataVencimento) : 'Sem data';
+        const nomeCliente = v.cliente || 'Consumidor Final';
+        const pedidoCurto = String(v.id || '').slice(-4);
+        const dataPedido = v.data || '-';
+
+        return `
+          <tr style="${vencida ? 'background-color: #fef2f2;' : ''}">
+            <td><strong>${nomeCliente}</strong></td>
+            <td>#${pedidoCurto}<br><span style="font-size: 0.75rem; color: #64748b;">${dataPedido}</span></td>
+            <td>
+              <span class="stock-badge ${vencida ? 'stock-empty' : 'stock-low'}">
+                ${vencida ? '⚠️ Vencida: ' : ''}${vencTexto}
+              </span>
+            </td>
+            <td style="text-align: right; white-space: nowrap;">
+              <strong style="color: ${vencida ? '#dc2626' : '#0f172a'};">${formatarMoeda(valorComMulta)}</strong>
+              ${vencida ? `<div style="font-size: 0.72rem; color: #dc2626;">c/ multa 1% (Orig.: ${formatarMoeda(valorBase)})</div>` : ''}
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+
     const listaModalAguardando = vendasAguardandoPgto.length === 0
       ? `<p style="color: #64748b; font-size: 0.92rem; text-align: center; padding: 1.25rem 0;">Nenhum valor aguardando pagamento no período selecionado.</p>`
       : `<div class="table-wrapper" style="max-height: 340px; overflow-y: auto; margin-bottom: 1rem;">
-          <table class="data-table">
+          <table class="data-table" style="width: 100%;">
             <thead>
               <tr>
                 <th>Cliente</th>
                 <th>Pedido</th>
                 <th>Vencimento</th>
-                <th>Valor a Receber</th>
+                <th style="text-align: right;">Valor a Receber</th>
               </tr>
             </thead>
             <tbody>
-              ${[...vendasAguardandoPgto].sort((a, b) => (a.dataVencimento || '').localeCompare(b.dataVencimento || '')).map(v => {
-                const vencida = verificarVendaVencida(v);
-                const valorBase = Number(v.valorOriginal ?? v.total ?? 0);
-                const valorComMulta = vencida ? valorBase * 1.01 : valorBase;
-                const vencTexto = v.dataVencimento ? formatarDataBR(v.dataVencimento) : 'Sem data';
-
-                return `
-                  <tr style="${vencida ? 'background-color: #fef2f2;' : ''}">
-                    <td><strong>${v.cliente || 'Consumidor Final'}</strong></td>
-                    <td>#${String(v.id).slice(-4)}<br><span style="font-size: 0.75rem; color: #64748b;">${v.data}</span></td>
-                    <td>
-                      <span class="stock-badge ${vencida ? 'stock-empty' : 'stock-low'}">
-                        ${vencida ? '⚠️ Vencida: ' : ''}${vencTexto}
-                      </span>
-                    </td>
-                    <td>
-                      <strong style="color: ${vencida ? '#dc2626' : '#0f172a'};">${formatarMoeda(valorComMulta)}</strong>
-                      ${vencida ? `<div style="font-size: 0.72rem; color: #dc2626;">c/ multa 1% (Orig.: ${formatarMoeda(valorBase)})</div>` : ''}
-                    </td>
-                  </tr>
-                `;
-              }).join('')}
+              ${linhasAguardandoHtml}
             </tbody>
           </table>
         </div>`;
 
     const valorEstoqueCusto = produtos.reduce((acc, p) => acc + (Number(p.custo || 0) * Number(p.estoque || 0)), 0);
     const produtosEstoqueBaixo = produtos.filter(p => Number(p.estoque) <= 5);
-    const vendasEmEntrega = vendasBase.filter(v => v.status === 'Em entrega');
+
+    const vendasEmSeparacao = [...vendasBase].reverse().filter(v => normalizarStatusPedido(v.status) === 'em separacao');
+    const vendasEmEntrega = [...vendasBase].reverse().filter(v => normalizarStatusPedido(v.status) === 'em entrega');
+    const vendasFinalizadas = [...vendasBase].reverse().filter(v => {
+      const st = normalizarStatusPedido(v.status);
+      return st === 'concluida' || st === 'finalizada';
+    });
 
     const htmlEstoqueBaixo = produtosEstoqueBaixo.length === 0
       ? `<p style="color: #64748b; font-size: 0.9rem;">Todos os produtos estão com estoque confortável.</p>`
@@ -172,25 +192,61 @@ export const DashboardModule = {
           `).join('')}
         </ul>`;
 
-    const htmlEntregas = vendasEmEntrega.length === 0
-      ? `<p style="color: #64748b; font-size: 0.9rem;">Nenhum pedido pendente de entrega no momento.</p>`
-      : `<ul class="alert-list">
-          ${vendasEmEntrega.slice(0, 8).map(v => `
-            <li
-              class="alert-item"
-              data-delivery-order-id="${v.id}"
-              title="Clique para ver os detalhes completos deste pedido"
-              style="cursor: pointer; border-radius: 8px; padding: 0.6rem 0.75rem; transition: background-color 0.15s ease;"
-              onmouseover="this.style.backgroundColor='#f1f5f9'"
-              onmouseout="this.style.backgroundColor=''">
-              <div>
-                <strong>#${String(v.id).slice(-4)}</strong> - ${v.cliente || 'Consumidor Final'}
-                <div style="font-size: 0.78rem; color: #64748b;">${v.data} &bull; <span style="color: #2563eb; font-weight: 600;">Ver detalhes ↗</span></div>
-              </div>
-              <span class="status-badge status-entrega">${formatarMoeda(v.total)}</span>
-            </li>
-          `).join('')}
-        </ul>`;
+    const renderizarListaPedidos = (lista, textoVazio, estiloBadge) => {
+      if (lista.length === 0) {
+        return `<p style="color: #64748b; font-size: 0.9rem;">${textoVazio}</p>`;
+      }
+      return `<ul class="alert-list" style="max-height: 310px; overflow-y: auto;">
+        ${lista.slice(0, 12).map(v => `
+          <li
+            class="alert-item"
+            data-order-detail-id="${v.id}"
+            title="Clique para ver os detalhes completos deste pedido"
+            style="cursor: pointer; border-radius: 8px; padding: 0.6rem 0.75rem; transition: background-color 0.15s ease;"
+            onmouseover="this.style.backgroundColor='#f1f5f9'"
+            onmouseout="this.style.backgroundColor=''">
+            <div>
+              <strong>#${String(v.id).slice(-4)}</strong> - ${v.cliente || 'Consumidor Final'}
+              <div style="font-size: 0.78rem; color: #64748b;">${v.data} &bull; <span style="color: #2563eb; font-weight: 600;">Ver detalhes ↗</span></div>
+            </div>
+            <span class="status-badge" style="${estiloBadge}">${formatarMoeda(v.total)}</span>
+          </li>
+        `).join('')}
+      </ul>`;
+    };
+
+    const htmlSeparacao = renderizarListaPedidos(
+      vendasEmSeparacao,
+      'Nenhum pedido em separação no momento.',
+      'background: #fef3c7; color: #92400e; font-weight: 700;'
+    );
+
+    const htmlEntregas = renderizarListaPedidos(
+      vendasEmEntrega,
+      'Nenhum pedido pendente de entrega no momento.',
+      'background: #dbeafe; color: #1e40af; font-weight: 700;'
+    );
+
+    const htmlFinalizados = renderizarListaPedidos(
+      vendasFinalizadas,
+      'Nenhum pedido finalizado ainda.',
+      'background: #dcfce7; color: #166534; font-weight: 700;'
+    );
+
+    const margemLucroPct = totalFaturado > 0 ? ((lucroLiquido / totalFaturado) * 100).toFixed(1) : '0.0';
+    const ticketMedio = qtdVendas > 0 ? (totalFaturado + totalAguardandoPgto) / qtdVendas : 0;
+
+    const cardLucroOuTicketHtml = isAdmin
+      ? `<div class="card metric-card" style="margin-bottom: 0; border-left: 4px solid #10b981;">
+          <span class="metric-label">Lucro Líquido Realizado</span>
+          <strong class="metric-value" style="color: #059669;">${formatarMoeda(lucroLiquido)}</strong>
+          <span class="metric-sub">Margem de ${margemLucroPct}%</span>
+        </div>`
+      : `<div class="card metric-card" style="margin-bottom: 0; border-left: 4px solid #10b981;">
+          <span class="metric-label">Ticket Médio</span>
+          <strong class="metric-value">${formatarMoeda(ticketMedio)}</strong>
+          <span class="metric-sub">Média por pedido no período</span>
+        </div>`;
 
     return `
       <div class="filter-bar">
@@ -237,19 +293,7 @@ export const DashboardModule = {
           </span>
         </div>
 
-        ${isAdmin ? `
-          <div class="card metric-card" style="margin-bottom: 0; border-left: 4px solid #10b981;">
-            <span class="metric-label">Lucro Líquido Realizado</span>
-            <strong class="metric-value" style="color: #059669;">${formatarMoeda(lucroLiquido)}</strong>
-            <span class="metric-sub">Margem de ${totalFaturado > 0 ? ((lucroLiquido / totalFaturado) * 100).toFixed(1) : '0.0'}%</span>
-          </div>
-        ` : `
-          <div class="card metric-card" style="margin-bottom: 0; border-left: 4px solid #10b981;">
-            <span class="metric-label">Ticket Médio</span>
-            <strong class="metric-value">${formatarMoeda(qtdVendas > 0 ? (totalFaturado + totalAguardandoPgto) / qtdVendas : 0)}</strong>
-            <span class="metric-sub">Média por pedido no período</span>
-          </div>
-        `}
+        ${cardLucroOuTicketHtml}
 
         <div class="card metric-card" style="margin-bottom: 0; border-left: 4px solid #8b5cf6;">
           <span class="metric-label">Capital em Estoque</span>
@@ -258,24 +302,42 @@ export const DashboardModule = {
         </div>
       </div>
 
-      <div class="dashboard-split">
-        <div class="card" style="margin-bottom: 0;">
-          <h3 style="margin-bottom: 0.75rem;">⚠️ Alertas de Estoque Baixo (≤ 5 un.)</h3>
-          ${htmlEstoqueBaixo}
+      <div class="dashboard-split" style="margin-bottom: 1.25rem;">
+        <div class="card" style="margin-bottom: 0; border-top: 4px solid #f59e0b;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <h3 style="margin: 0;">📦 Pedidos em Separação (${vendasEmSeparacao.length})</h3>
+            ${vendasEmSeparacao.length > 0 ? `<span style="font-size: 0.76rem; color: #64748b;">Clique para abrir</span>` : ''}
+          </div>
+          ${htmlSeparacao}
         </div>
 
-        <div class="card" style="margin-bottom: 0;">
+        <div class="card" style="margin-bottom: 0; border-top: 4px solid #2563eb;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
             <h3 style="margin: 0;">🚚 Pedidos Em Entrega (${vendasEmEntrega.length})</h3>
-            ${vendasEmEntrega.length > 0 ? `<span style="font-size: 0.76rem; color: #64748b;">Clique no pedido para abrir</span>` : ''}
+            ${vendasEmEntrega.length > 0 ? `<span style="font-size: 0.76rem; color: #64748b;">Clique para abrir</span>` : ''}
           </div>
           ${htmlEntregas}
         </div>
       </div>
 
+      <div class="dashboard-split">
+        <div class="card" style="margin-bottom: 0; border-top: 4px solid #10b981;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <h3 style="margin: 0;">✅ Pedidos Finalizados (${vendasFinalizadas.length})</h3>
+            ${vendasFinalizadas.length > 0 ? `<span style="font-size: 0.76rem; color: #64748b;">Clique para abrir</span>` : ''}
+          </div>
+          ${htmlFinalizados}
+        </div>
+
+        <div class="card" style="margin-bottom: 0;">
+          <h3 style="margin-bottom: 0.75rem;">⚠️ Alertas de Estoque Baixo (≤ 5 un.)</h3>
+          ${htmlEstoqueBaixo}
+        </div>
+      </div>
+
       <!-- Pop-up de Detalhes: Valores Aguardando Pagamento -->
       <div id="modal-aguardando-pgto" class="modal-overlay hidden">
-        <div class="modal-box" style="max-width: 620px; border-top: 5px solid #f59e0b;">
+        <div class="modal-box" style="max-width: 660px; border-top: 5px solid #f59e0b;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
             <div>
               <h3 style="margin: 0; color: #92400e;">⏳ Valores Aguardando Pagamento</h3>
@@ -299,24 +361,27 @@ export const DashboardModule = {
         </div>
       </div>
 
-      <!-- Pop-up de Detalhes do Pedido Em Entrega -->
-      <div id="modal-pedido-entrega" class="modal-overlay hidden">
-        <div class="modal-box" style="max-width: 580px; border-top: 5px solid #2563eb;">
+      <!-- Pop-up de Detalhes do Pedido (Separação / Em Entrega / Finalizados) -->
+      <div id="modal-detalhe-pedido" class="modal-overlay hidden">
+        <div id="modal-pedido-box" class="modal-box" style="max-width: 580px; border-top: 5px solid #2563eb;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
             <div>
-              <h3 id="modal-entrega-titulo" style="margin: 0; color: #1e3a8a;">🚚 Detalhes do Pedido</h3>
-              <p id="modal-entrega-subtitulo" style="font-size: 0.82rem; color: #64748b; margin-top: 0.2rem;"></p>
+              <h3 id="modal-pedido-titulo" style="margin: 0; color: #1e3a8a;">Detalhes do Pedido</h3>
+              <p id="modal-pedido-subtitulo" style="font-size: 0.82rem; color: #64748b; margin-top: 0.2rem;"></p>
             </div>
-            <button type="button" id="btn-close-entrega-x" class="btn-secondary" style="padding: 0.35rem 0.7rem;">✕</button>
+            <button type="button" id="btn-close-pedido-x" class="btn-secondary" style="padding: 0.35rem 0.7rem;">✕</button>
           </div>
 
-          <div id="modal-entrega-conteudo"></div>
+          <div id="modal-pedido-conteudo"></div>
 
           <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.6rem; margin-top: 1rem;">
-            <button type="button" id="btn-concluir-entrega" class="btn-primary" style="margin-top: 0; width: auto; background: #059669;">
-              ✅ Marcar como Concluída
+            <button type="button" id="btn-enviar-entrega" class="btn-primary hidden" style="margin-top: 0; width: auto; background: #2563eb;">
+              🚚 Enviar para Entrega
             </button>
-            <button type="button" id="btn-close-entrega" class="btn-secondary">Fechar</button>
+            <button type="button" id="btn-concluir-pedido" class="btn-primary hidden" style="margin-top: 0; width: auto; background: #059669;">
+              ✅ Marcar como Finalizado
+            </button>
+            <button type="button" id="btn-close-pedido" class="btn-secondary">Fechar</button>
           </div>
         </div>
       </div>
@@ -342,7 +407,6 @@ export const DashboardModule = {
       });
     }
 
-    // Pop-up ao clicar no card "Aguardando Pagamento"
     const cardAguardando = document.getElementById('card-aguardando-pgto');
     const modalAguardando = document.getElementById('modal-aguardando-pgto');
     const btnCloseAguardando = document.getElementById('btn-close-aguardando');
@@ -367,41 +431,85 @@ export const DashboardModule = {
       });
     }
 
-    // Pop-up ao clicar em um pedido na lista "Pedidos Em Entrega"
-    const modalEntrega = document.getElementById('modal-pedido-entrega');
-    const modalEntregaTitulo = document.getElementById('modal-entrega-titulo');
-    const modalEntregaSubtitulo = document.getElementById('modal-entrega-subtitulo');
-    const modalEntregaConteudo = document.getElementById('modal-entrega-conteudo');
-    const btnCloseEntrega = document.getElementById('btn-close-entrega');
-    const btnCloseEntregaX = document.getElementById('btn-close-entrega-x');
-    const btnConcluirEntrega = document.getElementById('btn-concluir-entrega');
+    const modalPedido = document.getElementById('modal-detalhe-pedido');
+    const modalPedidoBox = document.getElementById('modal-pedido-box');
+    const modalPedidoTitulo = document.getElementById('modal-pedido-titulo');
+    const modalPedidoSubtitulo = document.getElementById('modal-pedido-subtitulo');
+    const modalPedidoConteudo = document.getElementById('modal-pedido-conteudo');
+    const btnClosePedido = document.getElementById('btn-close-pedido');
+    const btnClosePedidoX = document.getElementById('btn-close-pedido-x');
+    const btnEnviarEntrega = document.getElementById('btn-enviar-entrega');
+    const btnConcluirPedido = document.getElementById('btn-concluir-pedido');
 
-    let pedidoEntregaSelecionadoId = null;
+    let pedidoSelecionadoId = null;
 
-    const fecharModalEntrega = () => {
-      pedidoEntregaSelecionadoId = null;
-      if (modalEntrega) modalEntrega.classList.add('hidden');
+    const fecharModalPedido = () => {
+      pedidoSelecionadoId = null;
+      if (modalPedido) modalPedido.classList.add('hidden');
     };
 
-    if (btnCloseEntrega) btnCloseEntrega.addEventListener('click', fecharModalEntrega);
-    if (btnCloseEntregaX) btnCloseEntregaX.addEventListener('click', fecharModalEntrega);
+    if (btnClosePedido) btnClosePedido.addEventListener('click', fecharModalPedido);
+    if (btnClosePedidoX) btnClosePedidoX.addEventListener('click', fecharModalPedido);
 
-    if (modalEntrega) {
-      modalEntrega.addEventListener('click', (e) => {
-        if (e.target === modalEntrega) fecharModalEntrega();
+    if (modalPedido) {
+      modalPedido.addEventListener('click', (e) => {
+        if (e.target === modalPedido) fecharModalPedido();
       });
     }
 
-    document.querySelectorAll('[data-delivery-order-id]').forEach(itemEl => {
+    document.querySelectorAll('[data-order-detail-id]').forEach(itemEl => {
       itemEl.addEventListener('click', () => {
-        const vendaId = itemEl.dataset.deliveryOrderId;
+        const vendaId = itemEl.dataset.orderDetailId;
         const vendas = Store.getCollection('vendas') || [];
         const clientes = Store.getCollection('clientes') || [];
         const venda = vendas.find(v => String(v.id) === String(vendaId));
 
-        if (!venda || !modalEntrega || !modalEntregaConteudo) return;
+        if (!venda || !modalPedido || !modalPedidoConteudo) return;
 
-        pedidoEntregaSelecionadoId = venda.id;
+        pedidoSelecionadoId = venda.id;
+
+        const stNorm = normalizarStatusPedido(venda.status);
+        const isSeparacao = stNorm === 'em separacao';
+        const isEntrega = stNorm === 'em entrega';
+        const isFinalizado = stNorm === 'concluida' || stNorm === 'finalizada';
+
+        let iconeStatus = '📋';
+        let corTopo = '#2563eb';
+        let corTitulo = '#1e3a8a';
+        let labelStatus = venda.status || '-';
+
+        if (isSeparacao) {
+          iconeStatus = '📦';
+          corTopo = '#f59e0b';
+          corTitulo = '#92400e';
+          labelStatus = 'Em separação';
+        } else if (isEntrega) {
+          iconeStatus = '🚚';
+          corTopo = '#2563eb';
+          corTitulo = '#1e3a8a';
+          labelStatus = 'Em entrega';
+        } else if (isFinalizado) {
+          iconeStatus = '✅';
+          corTopo = '#10b981';
+          corTitulo = '#065f46';
+          labelStatus = 'Finalizado';
+        }
+
+        if (modalPedidoBox) modalPedidoBox.style.borderTop = `5px solid ${corTopo}`;
+        if (modalPedidoTitulo) {
+          modalPedidoTitulo.textContent = `${iconeStatus} Pedido #${String(venda.id).slice(-4)} — ${labelStatus}`;
+          modalPedidoTitulo.style.color = corTitulo;
+        }
+        if (modalPedidoSubtitulo) {
+          modalPedidoSubtitulo.textContent = `Registrado em ${venda.data || '-'} • Vendedor: ${venda.vendedorNome || '-'}`;
+        }
+
+        if (btnEnviarEntrega) {
+          btnEnviarEntrega.classList.toggle('hidden', !isSeparacao);
+        }
+        if (btnConcluirPedido) {
+          btnConcluirPedido.classList.toggle('hidden', isFinalizado);
+        }
 
         const nomeCliente = (venda.cliente || 'Consumidor Final').trim();
         const clienteCadastro = clientes.find(
@@ -412,13 +520,6 @@ export const DashboardModule = {
         const subtotal = Number(venda.subtotal ?? venda.total ?? 0);
         const descontoValor = Number(venda.descontoValor || 0);
         const total = Number(venda.total || 0);
-
-        if (modalEntregaTitulo) {
-          modalEntregaTitulo.textContent = `🚚 Pedido #${String(venda.id).slice(-4)}`;
-        }
-        if (modalEntregaSubtitulo) {
-          modalEntregaSubtitulo.textContent = `Registrado em ${venda.data || '-'} • Vendedor: ${venda.vendedorNome || '-'}`;
-        }
 
         const linhasItensHtml = itens.length === 0
           ? `<tr><td colspan="4" style="text-align: center; color: #64748b;">Sem itens detalhados.</td></tr>`
@@ -431,7 +532,7 @@ export const DashboardModule = {
               </tr>
             `).join('');
 
-        modalEntregaConteudo.innerHTML = `
+        modalPedidoConteudo.innerHTML = `
           <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.85rem 1rem; margin-bottom: 1rem; font-size: 0.88rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.55rem;">
             <div>
               <span style="color: #64748b; display: block; font-size: 0.76rem;">Cliente</span>
@@ -467,7 +568,7 @@ export const DashboardModule = {
             </table>
           </div>
 
-          <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 0.85rem 1rem;">
+          <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0.85rem 1rem;">
             ${descontoValor > 0 ? `
               <div style="display: flex; justify-content: space-between; font-size: 0.84rem; color: #475569; margin-bottom: 0.25rem;">
                 <span>Subtotal:</span>
@@ -479,21 +580,30 @@ export const DashboardModule = {
               </div>
             ` : ''}
             <div style="display: flex; justify-content: space-between; align-items: center;">
-              <strong style="color: #1e3a8a;">Total do Pedido:</strong>
-              <span style="font-size: 1.25rem; font-weight: 800; color: #1d4ed8;">${formatarMoeda(total)}</span>
+              <strong style="color: #0f172a;">Total do Pedido:</strong>
+              <span style="font-size: 1.25rem; font-weight: 800; color: ${corTitulo};">${formatarMoeda(total)}</span>
             </div>
           </div>
         `;
 
-        modalEntrega.classList.remove('hidden');
+        modalPedido.classList.remove('hidden');
       });
     });
 
-    if (btnConcluirEntrega) {
-      btnConcluirEntrega.addEventListener('click', () => {
-        if (!pedidoEntregaSelecionadoId) return;
+    if (btnEnviarEntrega) {
+      btnEnviarEntrega.addEventListener('click', () => {
+        if (!pedidoSelecionadoId) return;
+        Store.updateItem('vendas', pedidoSelecionadoId, { status: 'Em entrega' });
+        fecharModalPedido();
+        if (refreshCallback) refreshCallback();
+      });
+    }
+
+    if (btnConcluirPedido) {
+      btnConcluirPedido.addEventListener('click', () => {
+        if (!pedidoSelecionadoId) return;
         const vendas = Store.getCollection('vendas') || [];
-        const venda = vendas.find(v => String(v.id) === String(pedidoEntregaSelecionadoId));
+        const venda = vendas.find(v => String(v.id) === String(pedidoSelecionadoId));
         if (!venda) return;
 
         const vencida = verificarVendaVencida(venda);
@@ -508,7 +618,7 @@ export const DashboardModule = {
           total: valorBase + multa
         });
 
-        fecharModalEntrega();
+        fecharModalPedido();
         if (refreshCallback) refreshCallback();
       });
     }

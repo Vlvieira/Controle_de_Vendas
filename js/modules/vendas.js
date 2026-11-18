@@ -257,7 +257,7 @@ export const VendasModule = {
 
           let statusBadgeClass = 'status-entrega';
           if (v.status === 'Concluída') statusBadgeClass = 'status-concluida';
-          if (v.status === 'Aguardando pagamento') statusBadgeClass = 'status-aguardando';
+          if (v.status === 'Aguardando pagamento' || v.status === 'Em separação') statusBadgeClass = 'status-aguardando';
 
           const vencInfo = v.dataVencimento && v.status !== 'Concluída'
             ? `<div style="font-size: 0.75rem; color: ${vencida ? '#dc2626' : '#b45309'}; font-weight: 600;">
@@ -287,6 +287,7 @@ export const VendasModule = {
               </td>
               <td>
                 <select class="status-select ${statusBadgeClass}" data-change-status="${v.id}">
+                  <option value="Em separação" ${v.status === 'Em separação' ? 'selected' : ''}>📦 Em separação</option>
                   <option value="Em entrega" ${v.status === 'Em entrega' ? 'selected' : ''}>🚚 Em entrega</option>
                   <option value="Aguardando pagamento" ${v.status === 'Aguardando pagamento' ? 'selected' : ''}>⏳ Aguardando pagamento</option>
                   <option value="Concluída" ${v.status === 'Concluída' ? 'selected' : ''}>✅ Concluída</option>
@@ -389,6 +390,7 @@ export const VendasModule = {
                 <label for="s-status">Status Inicial do Pedido</label>
                 <select id="s-status">
                   <option value="Concluída">✅ Concluída</option>
+                  <option value="Em separação">📦 Em separação</option>
                   <option value="Em entrega">🚚 Em entrega</option>
                   <option value="Aguardando pagamento">⏳ Aguardando pagamento</option>
                 </select>
