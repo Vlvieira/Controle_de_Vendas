@@ -55,6 +55,8 @@ function formatarPagamentoExibicao(pagamento) {
 }
 
 function verificarVendaVencida(venda) {
+  if (venda.status === 'Cancelado') return false;
+
   const isPendentePrazo =
     (isPagamentoAPrazo(venda.pagamento) || venda.status === 'Aguardando pagamento') &&
     !venda.quitado &&
@@ -83,6 +85,7 @@ function verificarSituacaoCliente(nomeDigitado) {
 
   const comprasPendentes = vendas.filter(
     v =>
+      v.status !== 'Cancelado' &&
       (v.cliente || '').trim().toLowerCase() === nomeLimpo &&
       (isPagamentoAPrazo(v.pagamento) || v.status === 'Aguardando pagamento') &&
       !v.quitado &&
@@ -208,6 +211,15 @@ function construirLinhaDoTempoVenda(venda) {
       usuario: venda.vendedorNome || '-',
       cor: '#d97706'
     });
+  } else if (venda.status === 'Cancelado') {
+    eventos.push({
+      icone: '🚫',
+      titulo: 'Pedido Cancelado',
+      descricao: 'Pedido cancelado e itens devolvidos ao estoque.',
+      dataHora: venda.dataCancelamento || venda.dataAtualizacao || venda.data || '-',
+      usuario: venda.usuarioCancelamento || venda.vendedorNome || '-',
+      cor: '#dc2626'
+    });
   }
 
   if (venda.status === 'Concluída') {
@@ -310,10 +322,8 @@ function renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo) {
     const itens = Array.isArray(v.itens) ? v.itens : [];
     const resumoItens = itens.map(i => escaparHtml(i.nome)).join(', ');
     const totalUnidades = itens.reduce((acc, i) => acc + Number(i.qtd || 0), 0);
-    const detalheQtdHtml = itens.length > 1
-      ? `<div style="font-size: 0.72rem; color: #64748b;">(${itens.map(i => Number(i.qtd || 0)).join(' + ')})</div>`
-      : '';
 
+    const isCancelado = v.status === 'Cancelado';
     const vencida = verificarVendaVencida(v);
     const valorBase = Number(v.valorOriginal ?? v.total ?? 0);
     const valorExibicao = vencida ? valorBase * 1.01 : Number(v.total || 0);
@@ -324,7 +334,7 @@ function renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo) {
     if (v.status === 'Concluída') statusBadgeClass = 'status-concluida';
     if (v.status === 'Aguardando pagamento' || v.status === 'Em separação') statusBadgeClass = 'status-aguardando';
 
-    const vencInfo = v.dataVencimento && v.status !== 'Concluída'
+    const vencInfo = v.dataVencimento && v.status !== 'Concluída' && !isCancelado
       ? `<div style="font-size: 0.75rem; color: ${vencida ? '#dc2626' : '#b45309'}; font-weight: 600;">
           ${vencida ? '⚠️ Vencida:' : 'Venc.:'} ${formatarDataBR(v.dataVencimento)}
          </div>`
@@ -336,8 +346,55 @@ function renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo) {
          </div>`
       : '';
 
+    const estiloLinha = isCancelado
+      ? 'background-color: #f8fafc; opacity: 0.78;'
+      : (vencida ? 'background-color: #fef2f2;' : '');
+
+    const colunaStatusHtml = isCancelado
+      ? `<span style="display: inline-flex; align-items: center; gap: 0.25rem; background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; font-weight: 700; font-size: 0.78rem; padding: 0.28rem 0.6rem; border-radius: 6px; white-space: nowrap;">
+          🚫 Cancelado
+         </span>`
+      : `<select class="status-select ${statusBadgeClass}" data-change-status="${v.id}">
+          <option value="Em separação" ${v.status === 'Em separação' ? 'selected' : ''}>📦 Em separação</option>
+          <option value="Em entrega" ${v.status === 'Em entrega' ? 'selected' : ''}>🚚 Em entrega</option>
+          <option value="Aguardando pagamento" ${v.status === 'Aguardando pagamento' ? 'selected' : ''}>⏳ Aguardando pagamento</option>
+          <option value="Concluída" ${v.status === 'Concluída' ? 'selected' : ''}>✅ Concluída</option>
+        </select>`;
+
+    const colunaAcoesHtml = isAdmin
+      ? `<td style="white-space: nowrap;">
+          <div style="display: inline-flex; align-items: center; gap: 0.35rem;">
+            <button
+              type="button"
+              class="btn-danger-sm"
+              data-refund-sale="${v.id}"
+              title="Estornar venda: devolve os itens ao estoque e remove o registro"
+            >
+              Estornar
+            </button>
+            ${isCancelado
+              ? `<button
+                  type="button"
+                  disabled
+                  style="padding: 0.3rem 0.55rem; font-size: 0.76rem; font-weight: 600; border-radius: 6px; border: 1px solid #cbd5e1; background: #f1f5f9; color: #94a3b8; cursor: not-allowed;"
+                >
+                  Cancelado
+                </button>`
+              : `<button
+                  type="button"
+                  data-mark-canceled="${v.id}"
+                  title="Cancelar pedido: devolve os itens ao estoque e mantém no histórico como Cancelado"
+                  style="padding: 0.3rem 0.55rem; font-size: 0.76rem; font-weight: 600; border-radius: 6px; border: 1px solid #fdba74; background: #fff7ed; color: #c2410c; cursor: pointer;"
+                >
+                  Cancelado
+                </button>`
+            }
+          </div>
+        </td>`
+      : '';
+
     return `
-      <tr style="${vencida ? 'background-color: #fef2f2;' : ''}">
+      <tr style="${estiloLinha}">
         <td>
           <button
             type="button"
@@ -350,34 +407,24 @@ function renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo) {
           <br><span style="font-size: 0.78rem; color: #64748b;">${v.data}</span>
         </td>
         <td>${v.cliente || 'Consumidor Final'}</td>
-        <td style="max-width: 240px;">${resumoItens}</td>
+        <td style="max-width: 240px; ${isCancelado ? 'text-decoration: line-through; color: #64748b;' : ''}">${resumoItens}</td>
         <td style="white-space: nowrap;">
           <strong>${totalUnidades} un.</strong>
-          ${detalheQtdHtml}
         </td>
         <td>
           <span style="font-size: 0.85rem;">${formatarPagamentoExibicao(v.pagamento)}</span>
           ${vencInfo}
         </td>
         <td>
-          <strong style="${vencida ? 'color: #dc2626;' : ''}">${formatarMoeda(valorExibicao)}</strong>
-          ${infoDescontoHtml}
+          <strong style="${isCancelado ? 'text-decoration: line-through; color: #64748b;' : (vencida ? 'color: #dc2626;' : '')}">${formatarMoeda(valorExibicao)}</strong>
+          ${!isCancelado ? infoDescontoHtml : ''}
           ${vencida ? `<div style="font-size: 0.72rem; color: #dc2626;">c/ multa 1%</div>` : ''}
         </td>
         <td>
-          <select class="status-select ${statusBadgeClass}" data-change-status="${v.id}">
-            <option value="Em separação" ${v.status === 'Em separação' ? 'selected' : ''}>📦 Em separação</option>
-            <option value="Em entrega" ${v.status === 'Em entrega' ? 'selected' : ''}>🚚 Em entrega</option>
-            <option value="Aguardando pagamento" ${v.status === 'Aguardando pagamento' ? 'selected' : ''}>⏳ Aguardando pagamento</option>
-            <option value="Concluída" ${v.status === 'Concluída' ? 'selected' : ''}>✅ Concluída</option>
-          </select>
+          ${colunaStatusHtml}
         </td>
         <td>${v.vendedorNome || '-'}</td>
-        ${isAdmin ? `
-          <td>
-            <button type="button" class="btn-danger-sm" data-cancel-sale="${v.id}" title="Cancelar venda e devolver estoque">Estornar</button>
-          </td>
-        ` : ''}
+        ${colunaAcoesHtml}
       </tr>
     `;
   }).join('');
@@ -741,14 +788,14 @@ export const VendasModule = {
         </div>
       </div>
 
-      <!-- Pop-up de Confirmação de Estorno de Venda -->
+      <!-- Pop-up de Confirmação de Estorno / Cancelamento de Venda -->
       <div id="cancel-sale-confirm-modal" class="modal-overlay hidden">
-        <div class="modal-box" style="max-width: 480px; width: 95%; border-top: 5px solid #ef4444;">
+        <div id="cancel-sale-confirm-box" class="modal-box" style="max-width: 480px; width: 95%; border-top: 5px solid #ef4444;">
           <div style="display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.85rem;">
-            <span style="font-size: 1.65rem;">⚠️</span>
+            <span id="cancel-sale-confirm-icon" style="font-size: 1.65rem;">⚠️</span>
             <div>
-              <h3 style="color: #b91c1c; margin: 0;">Confirmar Estorno da Venda</h3>
-              <p style="font-size: 0.82rem; color: #64748b; margin: 0;">Esta ação não poderá ser desfeita</p>
+              <h3 id="cancel-sale-confirm-title" style="color: #b91c1c; margin: 0;">Confirmar Estorno da Venda</h3>
+              <p id="cancel-sale-confirm-subtitle" style="font-size: 0.82rem; color: #64748b; margin: 0;">Esta ação não poderá ser desfeita</p>
             </div>
           </div>
 
@@ -756,8 +803,8 @@ export const VendasModule = {
           </div>
 
           <div style="display: flex; gap: 0.65rem; justify-content: flex-end;">
-            <button type="button" id="btn-cancel-sale-abort" class="btn-secondary">Cancelar</button>
-            <button type="button" id="btn-cancel-sale-confirm" class="btn-primary" style="margin-top: 0; width: auto; background: #dc2626;">✓ Confirmar Estorno</button>
+            <button type="button" id="btn-cancel-sale-abort" class="btn-secondary">Voltar</button>
+            <button type="button" id="btn-cancel-sale-confirm" class="btn-primary" style="margin-top: 0; width: auto; background: #dc2626;">✓ Confirmar</button>
           </div>
         </div>
       </div>
@@ -1334,6 +1381,7 @@ export const VendasModule = {
           dataVencimento,
           status,
           quitado,
+          estoqueDevolvido: false,
           dataConclusao: status === 'Concluída' ? dataFormatada : null,
           usuarioConclusao: status === 'Concluída' ? currentUser.nome : null,
           historicoStatus: historicoInicial,
@@ -1383,6 +1431,7 @@ export const VendasModule = {
       const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
       if (!venda || !modalHistPedido || !modalHistContent) return;
 
+      const isCancelado = venda.status === 'Cancelado';
       const vencida = verificarVendaVencida(venda);
       const valorBase = Number(venda.valorOriginal ?? venda.total ?? 0);
       const valorAtual = vencida ? valorBase * 1.01 : Number(venda.total || 0);
@@ -1391,7 +1440,8 @@ export const VendasModule = {
       const multaAplicada = Number(venda.multaAplicada || (vencida ? valorBase * 0.01 : 0));
 
       let corTopo = '#2563eb';
-      if (venda.status === 'Concluída') corTopo = '#059669';
+      if (isCancelado) corTopo = '#dc2626';
+      else if (venda.status === 'Concluída') corTopo = '#059669';
       else if (venda.status === 'Aguardando pagamento' || venda.status === 'Em separação') corTopo = '#d97706';
 
       if (modalHistBox) modalHistBox.style.borderTop = `5px solid ${corTopo}`;
@@ -1442,8 +1492,49 @@ export const VendasModule = {
             </tr>
           `).join('');
 
+      const usuariosCadastrados = Store.getCollection('usuarios') || [];
+      const existeVendedorNaLista = usuariosCadastrados.some(
+        u => String(u.id) === String(venda.vendedorId) || String(u.nome || '').toLowerCase() === String(venda.vendedorNome || '').toLowerCase()
+      );
+      const opcoesVendedoresHtml = [
+        !existeVendedorNaLista && venda.vendedorNome
+          ? `<option value="${escaparHtml(String(venda.vendedorId || ''))}" selected>${escaparHtml(venda.vendedorNome)}</option>`
+          : '',
+        ...usuariosCadastrados.map(u => {
+          const isSelecionado =
+            String(u.id) === String(venda.vendedorId) ||
+            (!venda.vendedorId && String(u.nome || '').toLowerCase() === String(venda.vendedorNome || '').toLowerCase());
+          return `<option value="${escaparHtml(String(u.id))}" ${isSelecionado ? 'selected' : ''}>${escaparHtml(u.nome)}</option>`;
+        })
+      ].join('');
+
+      const blocoVendedorHtml = isAdmin
+        ? `<div>
+            <label for="edit-order-seller-select" style="color: #64748b; font-size: 0.75rem; display: block; margin-bottom: 0.25rem;">Vendedor (Editar)</label>
+            <div style="display: flex; align-items: center; gap: 0.35rem;">
+              <select
+                id="edit-order-seller-select"
+                style="flex: 1; min-width: 0; padding: 0.32rem 0.5rem; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.83rem; font-weight: 600; background: #fff; color: #0f172a;"
+              >
+                ${opcoesVendedoresHtml}
+              </select>
+              <button
+                type="button"
+                id="btn-save-order-seller"
+                style="padding: 0.34rem 0.6rem; font-size: 0.78rem; font-weight: 700; border-radius: 6px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; cursor: pointer; white-space: nowrap;"
+              >
+                Salvar
+              </button>
+            </div>
+            <div id="edit-order-seller-feedback" class="hidden" style="font-size: 0.74rem; color: #059669; font-weight: 600; margin-top: 0.25rem;"></div>
+          </div>`
+        : `<div>
+            <span style="color: #64748b; font-size: 0.75rem; display: block;">Vendedor</span>
+            <strong>${escaparHtml(venda.vendedorNome || '-')}</strong>
+          </div>`;
+
       modalHistContent.innerHTML = `
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem 0.9rem; margin-bottom: 1rem; font-size: 0.85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem;">
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem 0.9rem; margin-bottom: 1rem; font-size: 0.85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.6rem;">
           <div>
             <span style="color: #64748b; font-size: 0.75rem; display: block;">Cliente</span>
             <strong>${escaparHtml(venda.cliente || 'Consumidor Final')}</strong>
@@ -1453,10 +1544,7 @@ export const VendasModule = {
             <strong>${escaparHtml(formatarPagamentoExibicao(venda.pagamento))}</strong>
             ${venda.dataVencimento ? `<div style="font-size: 0.76rem; color: ${vencida ? '#dc2626' : '#b45309'};">Venc.: ${formatarDataBR(venda.dataVencimento)}</div>` : ''}
           </div>
-          <div>
-            <span style="color: #64748b; font-size: 0.75rem; display: block;">Vendedor</span>
-            <strong>${escaparHtml(venda.vendedorNome || '-')}</strong>
-          </div>
+          ${blocoVendedorHtml}
         </div>
 
         <h4 style="margin: 0 0 0.65rem 0; font-size: 0.92rem; color: #1e293b;">Linha do Tempo da Compra</h4>
@@ -1505,25 +1593,87 @@ export const VendasModule = {
         </div>
       `;
 
+      if (isAdmin) {
+        const selNovoVendedor = document.getElementById('edit-order-seller-select');
+        const btnSalvarVendedor = document.getElementById('btn-save-order-seller');
+        const feedbackVendedor = document.getElementById('edit-order-seller-feedback');
+
+        if (btnSalvarVendedor && selNovoVendedor) {
+          btnSalvarVendedor.addEventListener('click', () => {
+            const novoVendedorId = selNovoVendedor.value;
+            const usuarioEscolhido = (Store.getCollection('usuarios') || []).find(
+              u => String(u.id) === String(novoVendedorId)
+            );
+            if (!usuarioEscolhido) return;
+
+            const vendedorAnterior = venda.vendedorNome || '-';
+            if (
+              String(venda.vendedorId) === String(usuarioEscolhido.id) &&
+              vendedorAnterior === usuarioEscolhido.nome
+            ) {
+              if (feedbackVendedor) {
+                feedbackVendedor.textContent = 'Este vendedor já está vinculado ao pedido.';
+                feedbackVendedor.style.color = '#64748b';
+                feedbackVendedor.classList.remove('hidden');
+              }
+              return;
+            }
+
+            const dataAgora = obterDataHoraAtualBR();
+            const historicoAtual = Array.isArray(venda.historicoStatus) && venda.historicoStatus.length > 0
+              ? [...venda.historicoStatus]
+              : construirLinhaDoTempoVenda(venda);
+
+            historicoAtual.push({
+              icone: '👤',
+              titulo: 'Vendedor Alterado',
+              descricao: `Vendedor alterado de "${vendedorAnterior}" para "${usuarioEscolhido.nome}".`,
+              dataHora: dataAgora,
+              usuario: currentUser.nome,
+              cor: '#2563eb'
+            });
+
+            Store.updateItem('vendas', venda.id, {
+              vendedorId: usuarioEscolhido.id,
+              vendedorNome: usuarioEscolhido.nome,
+              dataAtualizacao: dataAgora,
+              historicoStatus: historicoAtual
+            });
+
+            if (refreshCallback) refreshCallback();
+            abrirModalHistoricoPedido(venda.id);
+
+            const feedbackAtualizado = document.getElementById('edit-order-seller-feedback');
+            if (feedbackAtualizado) {
+              feedbackAtualizado.textContent = '✓ Vendedor atualizado com sucesso!';
+              feedbackAtualizado.style.color = '#059669';
+              feedbackAtualizado.classList.remove('hidden');
+            }
+          });
+        }
+      }
+
       modalHistPedido.classList.remove('hidden');
     };
 
-    // Modal de confirmação de estorno
+    // Modal de confirmação de Estorno ou Cancelamento
     const modalEstorno = document.getElementById('cancel-sale-confirm-modal');
+    const modalEstornoBox = document.getElementById('cancel-sale-confirm-box');
+    const modalEstornoIcon = document.getElementById('cancel-sale-confirm-icon');
+    const modalEstornoTitle = document.getElementById('cancel-sale-confirm-title');
+    const modalEstornoSubtitle = document.getElementById('cancel-sale-confirm-subtitle');
     const modalEstornoDetalhes = document.getElementById('cancel-sale-confirm-details');
     const btnAbortarEstorno = document.getElementById('btn-cancel-sale-abort');
     const btnConfirmarEstorno = document.getElementById('btn-cancel-sale-confirm');
-    let vendaIdParaEstornar = null;
+    let acaoVendaPendente = null; // { vendaId, tipo: 'estornar' | 'cancelar' }
 
     const fecharModalEstorno = () => {
-      vendaIdParaEstornar = null;
+      acaoVendaPendente = null;
       if (modalEstorno) modalEstorno.classList.add('hidden');
     };
 
-    const executarEstornoVenda = (vendaId) => {
-      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
-      if (!venda) return;
-
+    const devolverItensAoEstoque = (venda) => {
+      if (!venda || venda.estoqueDevolvido) return;
       const produtosAtuais = Store.getCollection('produtos') || [];
       (venda.itens || []).forEach(item => {
         const prod = produtosAtuais.find(p => String(p.id) === String(item.produtoId));
@@ -1533,8 +1683,47 @@ export const VendasModule = {
           });
         }
       });
+    };
 
+    const executarEstornoVenda = (vendaId) => {
+      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
+      if (!venda) return;
+
+      devolverItensAoEstoque(venda);
       Store.removeItem('vendas', venda.id);
+      if (refreshCallback) refreshCallback();
+    };
+
+    const executarCancelamentoVenda = (vendaId) => {
+      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
+      if (!venda || venda.status === 'Cancelado') return;
+
+      devolverItensAoEstoque(venda);
+
+      const dataAgora = obterDataHoraAtualBR();
+      const historicoAtual = Array.isArray(venda.historicoStatus) && venda.historicoStatus.length > 0
+        ? [...venda.historicoStatus]
+        : construirLinhaDoTempoVenda(venda);
+
+      historicoAtual.push({
+        icone: '🚫',
+        titulo: 'Pedido Cancelado',
+        descricao: 'Pedido marcado como Cancelado; itens devolvidos ao estoque e registro mantido no histórico.',
+        dataHora: dataAgora,
+        usuario: currentUser.nome,
+        cor: '#dc2626'
+      });
+
+      Store.updateItem('vendas', venda.id, {
+        status: 'Cancelado',
+        quitado: false,
+        estoqueDevolvido: true,
+        dataAtualizacao: dataAgora,
+        dataCancelamento: dataAgora,
+        usuarioCancelamento: currentUser.nome,
+        historicoStatus: historicoAtual
+      });
+
       if (refreshCallback) refreshCallback();
     };
 
@@ -1546,34 +1735,73 @@ export const VendasModule = {
     }
     if (btnConfirmarEstorno) {
       btnConfirmarEstorno.addEventListener('click', () => {
-        if (!vendaIdParaEstornar) return;
-        const idAlvo = vendaIdParaEstornar;
+        if (!acaoVendaPendente) return;
+        const { vendaId, tipo } = acaoVendaPendente;
         fecharModalEstorno();
-        executarEstornoVenda(idAlvo);
+        if (tipo === 'estornar') {
+          executarEstornoVenda(vendaId);
+        } else if (tipo === 'cancelar') {
+          executarCancelamentoVenda(vendaId);
+        }
       });
     }
 
-    const abrirConfirmacaoEstorno = (vendaId) => {
+    const abrirConfirmacaoAcaoVenda = (vendaId, tipo) => {
       const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
       if (!venda || !modalEstorno || !modalEstornoDetalhes) return;
 
-      vendaIdParaEstornar = venda.id;
+      acaoVendaPendente = { vendaId: venda.id, tipo };
       const resumoItens = (venda.itens || []).map(i => `${i.qtd}x ${escaparHtml(i.nome)}`).join(', ');
+      const isEstorno = tipo === 'estornar';
+
+      if (modalEstornoBox && modalEstornoIcon && modalEstornoTitle && modalEstornoSubtitle && btnConfirmarEstorno) {
+        if (isEstorno) {
+          modalEstornoBox.style.borderTop = '5px solid #ef4444';
+          modalEstornoIcon.textContent = '⚠️';
+          modalEstornoTitle.textContent = 'Confirmar Estorno da Venda';
+          modalEstornoTitle.style.color = '#b91c1c';
+          modalEstornoSubtitle.textContent = 'Devolve ao estoque e remove o pedido do histórico';
+          modalEstornoDetalhes.style.background = '#fef2f2';
+          modalEstornoDetalhes.style.borderColor = '#fecaca';
+          modalEstornoDetalhes.style.color = '#7f1d1d';
+          btnConfirmarEstorno.style.background = '#dc2626';
+          btnConfirmarEstorno.textContent = '✓ Confirmar Estorno';
+        } else {
+          modalEstornoBox.style.borderTop = '5px solid #f97316';
+          modalEstornoIcon.textContent = '🚫';
+          modalEstornoTitle.textContent = 'Confirmar Cancelamento do Pedido';
+          modalEstornoTitle.style.color = '#c2410c';
+          modalEstornoSubtitle.textContent = 'Mantém o pedido no histórico com status Cancelado';
+          modalEstornoDetalhes.style.background = '#fff7ed';
+          modalEstornoDetalhes.style.borderColor = '#fed7aa';
+          modalEstornoDetalhes.style.color = '#7c2d12';
+          btnConfirmarEstorno.style.background = '#ea580c';
+          btnConfirmarEstorno.textContent = '✓ Marcar como Cancelado';
+        }
+      }
+
+      const avisoEstoqueTexto = venda.estoqueDevolvido
+        ? 'ℹ️ Os itens deste pedido já foram devolvidos ao estoque anteriormente.'
+        : '📦 Os itens deste pedido voltarão automaticamente para o estoque.';
+
+      const avisoRodape = isEstorno
+        ? `${avisoEstoqueTexto} O registro da venda será apagado do histórico.`
+        : `${avisoEstoqueTexto} O registro permanecerá no histórico com status <strong>Cancelado</strong>.`;
 
       modalEstornoDetalhes.innerHTML = `
-        <p style="margin: 0 0 0.4rem 0;">Deseja realmente estornar o pedido <strong>#${escaparHtml(String(venda.id).slice(-4))}</strong>?</p>
+        <p style="margin: 0 0 0.4rem 0;">Deseja ${isEstorno ? 'estornar' : 'cancelar'} o pedido <strong>#${escaparHtml(String(venda.id).slice(-4))}</strong>?</p>
         <p style="margin: 0 0 0.35rem 0; font-size: 0.85rem;"><strong>Cliente:</strong> ${escaparHtml(venda.cliente || 'Consumidor Final')}</p>
         <p style="margin: 0 0 0.35rem 0; font-size: 0.85rem;"><strong>Valor:</strong> ${formatarMoeda(venda.total)}</p>
         <p style="margin: 0 0 0.55rem 0; font-size: 0.84rem;"><strong>Itens:</strong> ${resumoItens || '-'}</p>
-        <div style="padding-top: 0.45rem; border-top: 1px dashed #fca5a5; font-size: 0.82rem; font-weight: 600;">
-          📦 Os itens desta venda serão devolvidos automaticamente ao estoque e o registro será removido do histórico.
+        <div style="padding-top: 0.45rem; border-top: 1px dashed ${isEstorno ? '#fca5a5' : '#fdba74'}; font-size: 0.82rem; font-weight: 600;">
+          ${avisoRodape}
         </div>
       `;
 
       modalEstorno.classList.remove('hidden');
     };
 
-    // Vincula eventos das linhas do histórico (abrir timeline do pedido, mudança de status e estorno)
+    // Vincula eventos das linhas do histórico (abrir timeline do pedido, mudança de status, estorno e cancelamento)
     const vincularEventosTabelaHistorico = () => {
       document.querySelectorAll('[data-open-order-history]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1587,7 +1815,7 @@ export const VendasModule = {
           const novoStatus = select.value;
           const venda = Store.getCollection('vendas').find(v => v.id === vendaId);
 
-          if (venda) {
+          if (venda && venda.status !== 'Cancelado') {
             const dataAgora = obterDataHoraAtualBR();
             const historicoAtual = Array.isArray(venda.historicoStatus) && venda.historicoStatus.length > 0
               ? [...venda.historicoStatus]
@@ -1666,9 +1894,15 @@ export const VendasModule = {
       });
 
       if (isAdmin) {
-        document.querySelectorAll('[data-cancel-sale]').forEach(btn => {
+        document.querySelectorAll('[data-refund-sale]').forEach(btn => {
           btn.addEventListener('click', () => {
-            abrirConfirmacaoEstorno(btn.dataset.cancelSale);
+            abrirConfirmacaoAcaoVenda(btn.dataset.refundSale, 'estornar');
+          });
+        });
+
+        document.querySelectorAll('[data-mark-canceled]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            abrirConfirmacaoAcaoVenda(btn.dataset.markCanceled, 'cancelar');
           });
         });
       }

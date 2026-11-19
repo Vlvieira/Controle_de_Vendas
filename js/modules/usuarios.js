@@ -56,13 +56,22 @@ function gerarLinhasTabelaUsuarios(usuariosFiltrados, totalUsuarios, currentUser
 
     return `
       <tr>
-        <td><strong>${u.nome}</strong></td>
-        <td>${u.usuario}</td>
+        <td><strong>${escaparHtml(u.nome)}</strong></td>
+        <td>${escaparHtml(u.usuario)}</td>
         <td><span class="role-badge ${badgeClass}">${roleLabel}</span></td>
-        <td>
-          ${podeExcluir 
-            ? `<button class="btn-danger-sm" data-delete-id="${u.id}">Remover</button>` 
-            : `<span style="color: #94a3b8; font-size: 0.8rem;">Protegido</span>`}
+        <td style="white-space: nowrap;">
+          <div style="display: inline-flex; align-items: center; gap: 0.4rem;">
+            <button
+              type="button"
+              data-edit-user-id="${u.id}"
+              style="padding: 0.3rem 0.6rem; font-size: 0.78rem; font-weight: 600; border-radius: 6px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; cursor: pointer;"
+            >
+              Editar
+            </button>
+            ${podeExcluir
+              ? `<button type="button" class="btn-danger-sm" data-delete-id="${u.id}">Remover</button>`
+              : `<span style="color: #94a3b8; font-size: 0.8rem;">Protegido</span>`}
+          </div>
         </td>
       </tr>
     `;
@@ -159,6 +168,55 @@ export const UsuariosModule = {
           </table>
         </div>
       </div>
+
+      <!-- Pop-up de Edição de Usuário -->
+      <div id="edit-user-modal" class="modal-overlay hidden">
+        <div class="modal-box" style="max-width: 460px; width: 95%; border-top: 5px solid #2563eb;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.85rem;">
+            <div>
+              <h3 style="margin: 0; color: #1e3a8a;">Editar Usuário</h3>
+              <p id="edit-user-subtitle" style="font-size: 0.82rem; color: #64748b; margin: 0.2rem 0 0 0;">
+                Atualize os dados de acesso da equipe
+              </p>
+            </div>
+            <button type="button" id="btn-close-edit-user-x" class="btn-secondary" style="padding: 0.35rem 0.7rem;">✕</button>
+          </div>
+
+          <div id="edit-user-error" class="error-msg hidden" style="margin-bottom: 0.85rem;"></div>
+
+          <form id="edit-user-form">
+            <input type="hidden" id="edit-u-id">
+
+            <div class="form-group">
+              <label for="edit-u-nome">Nome Completo *</label>
+              <input type="text" id="edit-u-nome" required>
+            </div>
+
+            <div class="form-group">
+              <label for="edit-u-login">Login de Acesso *</label>
+              <input type="text" id="edit-u-login" required>
+            </div>
+
+            <div class="form-group">
+              <label for="edit-u-senha">Nova Senha <span style="font-weight: 400; color: #64748b;">(deixe em branco para manter a atual)</span></label>
+              <input type="password" id="edit-u-senha" placeholder="••••••" autocomplete="new-password">
+            </div>
+
+            <div class="form-group">
+              <label for="edit-u-perfil">Nível de Acesso</label>
+              <select id="edit-u-perfil">
+                <option value="vendedor">Vendedor</option>
+                <option value="admin">Administrador</option>
+              </select>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 0.65rem; margin-top: 1.1rem;">
+              <button type="button" id="btn-cancel-edit-user" class="btn-secondary">Cancelar</button>
+              <button type="submit" class="btn-primary" style="margin-top: 0; width: auto;">✓ Salvar Alterações</button>
+            </div>
+          </form>
+        </div>
+      </div>
     `;
   },
 
@@ -166,7 +224,124 @@ export const UsuariosModule = {
     const form = document.getElementById('new-user-form');
     const msgBox = document.getElementById('user-form-msg');
 
+    // Elementos do Modal de Edição
+    const modalEdit = document.getElementById('edit-user-modal');
+    const formEdit = document.getElementById('edit-user-form');
+    const erroEdit = document.getElementById('edit-user-error');
+    const subtitleEdit = document.getElementById('edit-user-subtitle');
+    const inpEditId = document.getElementById('edit-u-id');
+    const inpEditNome = document.getElementById('edit-u-nome');
+    const inpEditLogin = document.getElementById('edit-u-login');
+    const inpEditSenha = document.getElementById('edit-u-senha');
+    const selEditPerfil = document.getElementById('edit-u-perfil');
+    const btnCloseEditX = document.getElementById('btn-close-edit-user-x');
+    const btnCancelEdit = document.getElementById('btn-cancel-edit-user');
+
+    const fecharModalEdicao = () => {
+      if (erroEdit) erroEdit.classList.add('hidden');
+      if (formEdit) formEdit.reset();
+      if (modalEdit) modalEdit.classList.add('hidden');
+    };
+
+    const abrirModalEdicao = (usuarioId) => {
+      const usuarios = Store.getCollection('usuarios') || [];
+      const usuarioAlvo = usuarios.find(u => String(u.id) === String(usuarioId));
+      if (!usuarioAlvo || !modalEdit) return;
+
+      const currentUser = Store.getCurrentUser();
+      const isAdminPrincipal = usuarioAlvo.usuario === 'admin';
+      const isProprioUsuario = currentUser && String(usuarioAlvo.id) === String(currentUser.id);
+
+      if (erroEdit) erroEdit.classList.add('hidden');
+      if (inpEditId) inpEditId.value = usuarioAlvo.id;
+      if (inpEditNome) inpEditNome.value = usuarioAlvo.nome || '';
+      if (inpEditLogin) {
+        inpEditLogin.value = usuarioAlvo.usuario || '';
+        inpEditLogin.disabled = isAdminPrincipal;
+      }
+      if (inpEditSenha) inpEditSenha.value = '';
+      if (selEditPerfil) {
+        selEditPerfil.value = usuarioAlvo.perfil || 'vendedor';
+        selEditPerfil.disabled = isAdminPrincipal || isProprioUsuario;
+      }
+      if (subtitleEdit) {
+        subtitleEdit.textContent = `Editando acesso de ${usuarioAlvo.nome} (@${usuarioAlvo.usuario})`;
+      }
+
+      modalEdit.classList.remove('hidden');
+      if (inpEditNome) setTimeout(() => inpEditNome.focus(), 50);
+    };
+
+    if (btnCloseEditX) btnCloseEditX.addEventListener('click', fecharModalEdicao);
+    if (btnCancelEdit) btnCancelEdit.addEventListener('click', fecharModalEdicao);
+    if (modalEdit) {
+      modalEdit.addEventListener('click', (e) => {
+        if (e.target === modalEdit) fecharModalEdicao();
+      });
+    }
+
+    if (formEdit) {
+      formEdit.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const id = inpEditId.value;
+        const nome = inpEditNome.value.trim();
+        const loginNovo = inpEditLogin.value.trim().toLowerCase();
+        const novaSenha = inpEditSenha.value;
+        const perfilNovo = selEditPerfil.value;
+
+        if (!nome || !loginNovo) {
+          erroEdit.textContent = 'Preencha o nome completo e o login de acesso.';
+          erroEdit.classList.remove('hidden');
+          return;
+        }
+
+        const usuarios = Store.getCollection('usuarios') || [];
+        const usuarioOriginal = usuarios.find(u => String(u.id) === String(id));
+        if (!usuarioOriginal) return;
+
+        const loginDuplicado = usuarios.some(
+          u => String(u.id) !== String(id) && String(u.usuario || '').toLowerCase() === loginNovo
+        );
+        if (loginDuplicado) {
+          erroEdit.textContent = 'Este login de usuário já está em uso por outro cadastro.';
+          erroEdit.classList.remove('hidden');
+          return;
+        }
+
+        const updates = {
+          nome,
+          usuario: usuarioOriginal.usuario === 'admin' ? 'admin' : loginNovo,
+          perfil: usuarioOriginal.usuario === 'admin' ? 'admin' : perfilNovo
+        };
+
+        if (novaSenha && novaSenha.trim().length > 0) {
+          updates.senha = novaSenha;
+          updates.password = novaSenha;
+        }
+
+        Store.updateItem('usuarios', usuarioOriginal.id, updates);
+
+        // Mantém a sessão sincronizada se o administrador editou o próprio cadastro
+        const currentUser = Store.getCurrentUser();
+        if (currentUser && String(currentUser.id) === String(usuarioOriginal.id) && typeof Store.login === 'function') {
+          const senhaSessao = updates.senha || usuarioOriginal.senha;
+          try {
+            Store.login(updates.usuario, senhaSessao);
+          } catch (err) {}
+        }
+
+        fecharModalEdicao();
+        if (refreshCallback) refreshCallback();
+      });
+    }
+
     const vincularAcoesTabelaUsuarios = () => {
+      document.querySelectorAll('[data-edit-user-id]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          abrirModalEdicao(btn.dataset.editUserId);
+        });
+      });
+
       document.querySelectorAll('[data-delete-id]').forEach(btn => {
         btn.addEventListener('click', () => {
           const id = btn.dataset.deleteId;
