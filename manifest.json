@@ -1,7 +1,7 @@
 {
   "name": "GestãoVendas Pro",
   "short_name": "GestãoVendas",
-  "description": "Sistema modular de controle de vendas, estoque e clientes",
+  "description": "Sistema de controle de vendas, estoque e clientes",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#f1f5f9",

@@ -14,4 +14,3 @@
 - **Produtos & Estoque (`produtos.js`):** Catálogo com ocultação de custo/margem para Vendedores.
 - **Clientes (`clientes.js`):** Carteira de clientes com total comprado e pendências a prazo.
 - **PWA (`manifest.json` / `sw.js` / `icon.svg`):** Pronto para instalar no celular.
-

@@ -13,7 +13,8 @@ const ASSETS_TO_CACHE = [
   './js/modules/vendas.js',
   './js/modules/produtos.js',
   './js/modules/clientes.js',
-  './js/modules/usuarios.js'
+  './js/modules/usuarios.js',
+  './js/modules/suporte.js',
 ];
 
 self.addEventListener('install', (event) => {

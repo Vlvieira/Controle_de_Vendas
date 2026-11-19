@@ -11,6 +11,19 @@ function formatarDataBR(dataISO) {
   return `${dia}/${mes}/${ano}`;
 }
 
+function escaparHtml(texto) {
+  return String(texto || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function obterDataHoraAtualBR() {
+  const agora = new Date();
+  return `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 function obterDataVencimentoPadrao() {
   const dt = new Date();
   dt.setDate(dt.getDate() + 30);
@@ -140,13 +153,234 @@ function verificarSituacaoCliente(nomeDigitado) {
   };
 }
 
+function construirLinhaDoTempoVenda(venda) {
+  const pagamentoTexto = formatarPagamentoExibicao(venda.pagamento || '-');
+  const isPrazo = isPagamentoAPrazo(venda.pagamento);
+  const eventos = [];
+
+  if (Array.isArray(venda.historicoStatus) && venda.historicoStatus.length > 0) {
+    venda.historicoStatus.forEach(ev => {
+      eventos.push({
+        icone: ev.icone || '📋',
+        titulo: ev.titulo || ev.status || 'Atualização do pedido',
+        descricao: ev.descricao || '',
+        dataHora: ev.dataHora || venda.data || '-',
+        usuario: ev.usuario || venda.vendedorNome || '-',
+        cor: ev.cor || '#2563eb'
+      });
+    });
+    return eventos;
+  }
+
+  eventos.push({
+    icone: '📝',
+    titulo: 'Solicitação do Pedido Registrada',
+    descricao: `Pedido criado com pagamento via ${pagamentoTexto}${isPrazo && venda.dataVencimento ? ` (Venc.: ${formatarDataBR(venda.dataVencimento)})` : ''}.`,
+    dataHora: venda.data || '-',
+    usuario: venda.vendedorNome || '-',
+    cor: '#2563eb'
+  });
+
+  if (venda.status === 'Em separação') {
+    eventos.push({
+      icone: '📦',
+      titulo: 'Em Separação',
+      descricao: 'Itens sendo separados no estoque para envio/retirada.',
+      dataHora: venda.data || '-',
+      usuario: venda.vendedorNome || '-',
+      cor: '#d97706'
+    });
+  } else if (venda.status === 'Em entrega') {
+    eventos.push({
+      icone: '🚚',
+      titulo: 'Saiu para Entrega',
+      descricao: 'Pedido encaminhado para entrega ao cliente.',
+      dataHora: venda.dataAtualizacao || venda.data || '-',
+      usuario: venda.vendedorNome || '-',
+      cor: '#0284c7'
+    });
+  } else if (venda.status === 'Aguardando pagamento') {
+    eventos.push({
+      icone: '⏳',
+      titulo: 'Aguardando Recebimento do Pagamento',
+      descricao: `Pagamento pendente (${pagamentoTexto})${venda.dataVencimento ? ` • Vencimento: ${formatarDataBR(venda.dataVencimento)}` : ''}.`,
+      dataHora: venda.dataAtualizacao || venda.data || '-',
+      usuario: venda.vendedorNome || '-',
+      cor: '#d97706'
+    });
+  }
+
+  if (venda.status === 'Concluída') {
+    const multa = Number(venda.multaAplicada || 0);
+    eventos.push({
+      icone: '💰',
+      titulo: 'Pagamento Recebido / Quitado',
+      descricao: `Recebimento confirmado via ${pagamentoTexto}${multa > 0 ? ` (inclui multa de ${formatarMoeda(multa)})` : ''}.`,
+      dataHora: venda.dataConclusao || venda.data || '-',
+      usuario: venda.usuarioConclusao || venda.vendedorNome || '-',
+      cor: '#059669'
+    });
+    eventos.push({
+      icone: '✅',
+      titulo: 'Pedido Finalizado no Sistema',
+      descricao: 'Entrega e pagamento concluídos com sucesso.',
+      dataHora: venda.dataConclusao || venda.data || '-',
+      usuario: venda.usuarioConclusao || venda.vendedorNome || '-',
+      cor: '#059669'
+    });
+  }
+
+  return eventos;
+}
+
 let carrinhoAtual = [];
 let descontoPercentualAtual = 0;
 let ultimoClienteAlertado = '';
 let clienteSelecionadoAtual = 'Consumidor Final';
+let categoriaSelecionadaVenda = '';
+let filtroHistoricoVendas = '';
 
 function obterLimiteDesconto(isAdmin) {
   return isAdmin ? 50 : 40;
+}
+
+function obterCategoriasDisponiveis(produtosDisponiveis) {
+  const mapa = new Map();
+  (produtosDisponiveis || []).forEach(p => {
+    const cat = String(p.categoria || '').trim();
+    if (!cat) return;
+    const chave = cat.toLowerCase();
+    if (!mapa.has(chave)) {
+      mapa.set(chave, cat);
+    }
+  });
+  return Array.from(mapa.values()).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+}
+
+function gerarOptionsProdutosPorCategoria(produtosDisponiveis, categoriaFiltro) {
+  if (!produtosDisponiveis || produtosDisponiveis.length === 0) {
+    return `<option value="" selected disabled></option>`;
+  }
+
+  const catNorm = String(categoriaFiltro || '').trim().toLowerCase();
+  const filtrados = catNorm
+    ? produtosDisponiveis.filter(p => String(p.categoria || '').trim().toLowerCase() === catNorm)
+    : produtosDisponiveis;
+
+  if (filtrados.length === 0) {
+    return `<option value="" selected disabled></option>`;
+  }
+
+  const opcoes = filtrados.map(p => `
+    <option value="${p.id}">
+      ${escaparHtml(p.nome)}
+    </option>
+  `).join('');
+
+  return `<option value="" selected disabled></option>${opcoes}`;
+}
+
+function filtrarVendasHistorico(vendas, termo) {
+  const busca = String(termo || '').trim().toLowerCase();
+  if (!busca) return vendas;
+
+  return (vendas || []).filter(v => {
+    const pedidoId = v.id ? `#${String(v.id).slice(-4)} ${String(v.id)}` : '';
+    const cliente = v.cliente || 'Consumidor Final';
+    const itensTexto = (v.itens || []).map(i => `${i.nome} ${i.sku || ''}`).join(' ');
+    const pagamento = formatarPagamentoExibicao(v.pagamento || '');
+    const status = v.status || '';
+    const vendedor = v.vendedorNome || '';
+    const data = v.data || '';
+
+    const textoCompleto = `${pedidoId} ${cliente} ${itensTexto} ${pagamento} ${status} ${vendedor} ${data}`.toLowerCase();
+    return textoCompleto.includes(busca);
+  });
+}
+
+function renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo) {
+  if (!vendasFiltradas || vendasFiltradas.length === 0) {
+    const mensagemVazia = temFiltroAtivo
+      ? 'Nenhuma venda encontrada para a pesquisa informada.'
+      : 'Nenhuma venda registrada ainda.';
+    return `<tr><td colspan="${isAdmin ? 9 : 8}" style="text-align: center; color: #64748b; padding: 1.5rem;">${mensagemVazia}</td></tr>`;
+  }
+
+  return [...vendasFiltradas].reverse().map(v => {
+    const itens = Array.isArray(v.itens) ? v.itens : [];
+    const resumoItens = itens.map(i => escaparHtml(i.nome)).join(', ');
+    const totalUnidades = itens.reduce((acc, i) => acc + Number(i.qtd || 0), 0);
+    const detalheQtdHtml = itens.length > 1
+      ? `<div style="font-size: 0.72rem; color: #64748b;">(${itens.map(i => Number(i.qtd || 0)).join(' + ')})</div>`
+      : '';
+
+    const vencida = verificarVendaVencida(v);
+    const valorBase = Number(v.valorOriginal ?? v.total ?? 0);
+    const valorExibicao = vencida ? valorBase * 1.01 : Number(v.total || 0);
+    const descontoAplicadoPct = Number(v.descontoPercentual || 0);
+    const descontoAplicadoValor = Number(v.descontoValor || 0);
+
+    let statusBadgeClass = 'status-entrega';
+    if (v.status === 'Concluída') statusBadgeClass = 'status-concluida';
+    if (v.status === 'Aguardando pagamento' || v.status === 'Em separação') statusBadgeClass = 'status-aguardando';
+
+    const vencInfo = v.dataVencimento && v.status !== 'Concluída'
+      ? `<div style="font-size: 0.75rem; color: ${vencida ? '#dc2626' : '#b45309'}; font-weight: 600;">
+          ${vencida ? '⚠️ Vencida:' : 'Venc.:'} ${formatarDataBR(v.dataVencimento)}
+         </div>`
+      : '';
+
+    const infoDescontoHtml = descontoAplicadoPct > 0
+      ? `<div style="font-size: 0.74rem; color: #059669; font-weight: 600;">
+          Desc. ${descontoAplicadoPct.toFixed(1).replace('.0', '')}%${isAdmin ? ' s/ lucro' : ''} (-${formatarMoeda(descontoAplicadoValor)})
+         </div>`
+      : '';
+
+    return `
+      <tr style="${vencida ? 'background-color: #fef2f2;' : ''}">
+        <td>
+          <button
+            type="button"
+            data-open-order-history="${v.id}"
+            title="Clique para ver o histórico completo deste pedido"
+            style="background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; font-weight: 800; padding: 0.2rem 0.5rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-bottom: 0.2rem; display: inline-flex; align-items: center; gap: 0.25rem;"
+          >
+            #${v.id.slice(-4)} <span style="font-size: 0.72rem; font-weight: 600;">📋</span>
+          </button>
+          <br><span style="font-size: 0.78rem; color: #64748b;">${v.data}</span>
+        </td>
+        <td>${v.cliente || 'Consumidor Final'}</td>
+        <td style="max-width: 240px;">${resumoItens}</td>
+        <td style="white-space: nowrap;">
+          <strong>${totalUnidades} un.</strong>
+          ${detalheQtdHtml}
+        </td>
+        <td>
+          <span style="font-size: 0.85rem;">${formatarPagamentoExibicao(v.pagamento)}</span>
+          ${vencInfo}
+        </td>
+        <td>
+          <strong style="${vencida ? 'color: #dc2626;' : ''}">${formatarMoeda(valorExibicao)}</strong>
+          ${infoDescontoHtml}
+          ${vencida ? `<div style="font-size: 0.72rem; color: #dc2626;">c/ multa 1%</div>` : ''}
+        </td>
+        <td>
+          <select class="status-select ${statusBadgeClass}" data-change-status="${v.id}">
+            <option value="Em separação" ${v.status === 'Em separação' ? 'selected' : ''}>📦 Em separação</option>
+            <option value="Em entrega" ${v.status === 'Em entrega' ? 'selected' : ''}>🚚 Em entrega</option>
+            <option value="Aguardando pagamento" ${v.status === 'Aguardando pagamento' ? 'selected' : ''}>⏳ Aguardando pagamento</option>
+            <option value="Concluída" ${v.status === 'Concluída' ? 'selected' : ''}>✅ Concluída</option>
+          </select>
+        </td>
+        <td>${v.vendedorNome || '-'}</td>
+        ${isAdmin ? `
+          <td>
+            <button type="button" class="btn-danger-sm" data-cancel-sale="${v.id}" title="Cancelar venda e devolver estoque">Estornar</button>
+          </td>
+        ` : ''}
+      </tr>
+    `;
+  }).join('');
 }
 
 function renderizarBannerSituacaoCliente(info) {
@@ -195,32 +429,41 @@ export const VendasModule = {
     const isAdmin = currentUser?.perfil === 'admin';
     const limiteDescontoPct = obterLimiteDesconto(isAdmin);
 
-    const produtos = Store.getCollection('produtos');
-    const clientes = Store.getCollection('clientes');
-    const todasVendas = Store.getCollection('vendas');
+    const produtos = Store.getCollection('produtos') || [];
+    const clientes = Store.getCollection('clientes') || [];
+    const todasVendas = Store.getCollection('vendas') || [];
 
     const vendasExibidas = isAdmin
       ? todasVendas
       : todasVendas.filter(v => v.vendedorId === currentUser.id);
 
-    const produtosDisponiveis = produtos.filter(p => Number(p.estoque) > 0);
+    const vendasFiltradas = filtrarVendasHistorico(vendasExibidas, filtroHistoricoVendas);
+    const temFiltroAtivo = filtroHistoricoVendas.trim().length > 0;
 
-    const optionsProdutos = produtosDisponiveis.length === 0
-      ? `<option value="">Nenhum produto com estoque disponível</option>`
-      : produtosDisponiveis.map(p => `
-          <option value="${p.id}">
-            ${p.sku} - ${p.nome} (${formatarMoeda(p.venda)} | Estoque: ${p.estoque})
-          </option>
-        `).join('');
+    const produtosDisponiveis = produtos.filter(p => Number(p.estoque) > 0);
+    const categoriasDisponiveis = obterCategoriasDisponiveis(produtosDisponiveis);
+
+    if (
+      categoriaSelecionadaVenda &&
+      !categoriasDisponiveis.some(c => c.toLowerCase() === categoriaSelecionadaVenda.toLowerCase())
+    ) {
+      categoriaSelecionadaVenda = '';
+    }
+
+    const optionsCategorias = categoriasDisponiveis.map(cat => {
+      const selected = cat.toLowerCase() === categoriaSelecionadaVenda.toLowerCase() ? 'selected' : '';
+      return `<option value="${escaparHtml(cat)}" ${selected}>${escaparHtml(cat)}</option>`;
+    }).join('');
+
+    const optionsProdutos = gerarOptionsProdutosPorCategoria(produtosDisponiveis, categoriaSelecionadaVenda);
 
     const optionsClientes = clientes.map(c => `
-      <option value="${c.nome}" ${c.nome === clienteSelecionadoAtual ? 'selected' : ''}>${c.nome}${c.telefone ? ` (${c.telefone})` : ''}</option>
+      <option value="${escaparHtml(c.nome)}" ${c.nome === clienteSelecionadoAtual ? 'selected' : ''}>${escaparHtml(c.nome)}${c.telefone ? ` (${escaparHtml(c.telefone)})` : ''}</option>
     `).join('');
 
     const infoClienteAtual = verificarSituacaoCliente(clienteSelecionadoAtual);
     const bannerClienteHtml = renderizarBannerSituacaoCliente(infoClienteAtual);
 
-    // Cálculo com desconto incidindo sobre o LUCRO (Venda - Custo) limitado a 50% (admin) ou 40% (vendedor)
     const subtotalCarrinho = carrinhoAtual.reduce((acc, item) => acc + (item.preco * item.qtd), 0);
     const custoTotalCarrinho = carrinhoAtual.reduce((acc, item) => acc + (item.custo * item.qtd), 0);
     const lucroBrutoCarrinho = Math.max(0, subtotalCarrinho - custoTotalCarrinho);
@@ -235,7 +478,7 @@ export const VendasModule = {
       ? `<tr><td colspan="5" style="text-align: center; color: #64748b; padding: 1rem;">Adicione itens para iniciar a venda.</td></tr>`
       : carrinhoAtual.map((item, idx) => `
           <tr>
-            <td><strong>${item.sku}</strong> - ${item.nome}</td>
+            <td>${escaparHtml(item.nome)}</td>
             <td>${formatarMoeda(item.preco)}</td>
             <td>${item.qtd} un.</td>
             <td><strong>${formatarMoeda(item.preco * item.qtd)}</strong></td>
@@ -245,63 +488,11 @@ export const VendasModule = {
           </tr>
         `).join('');
 
-    const linhasHistorico = vendasExibidas.length === 0
-      ? `<tr><td colspan="${isAdmin ? 8 : 7}" style="text-align: center; color: #64748b; padding: 1.5rem;">Nenhuma venda registrada ainda.</td></tr>`
-      : [...vendasExibidas].reverse().map(v => {
-          const resumoItens = (v.itens || []).map(i => `${i.qtd}x ${i.nome}`).join(', ');
-          const vencida = verificarVendaVencida(v);
-          const valorBase = Number(v.valorOriginal ?? v.total ?? 0);
-          const valorExibicao = vencida ? valorBase * 1.01 : Number(v.total || 0);
-          const descontoAplicadoPct = Number(v.descontoPercentual || 0);
-          const descontoAplicadoValor = Number(v.descontoValor || 0);
+    const linhasHistorico = renderizarLinhasHistorico(vendasFiltradas, isAdmin, temFiltroAtivo);
 
-          let statusBadgeClass = 'status-entrega';
-          if (v.status === 'Concluída') statusBadgeClass = 'status-concluida';
-          if (v.status === 'Aguardando pagamento' || v.status === 'Em separação') statusBadgeClass = 'status-aguardando';
-
-          const vencInfo = v.dataVencimento && v.status !== 'Concluída'
-            ? `<div style="font-size: 0.75rem; color: ${vencida ? '#dc2626' : '#b45309'}; font-weight: 600;">
-                ${vencida ? '⚠️ Vencida:' : 'Venc.:'} ${formatarDataBR(v.dataVencimento)}
-               </div>`
-            : '';
-
-          const infoDescontoHtml = descontoAplicadoPct > 0
-            ? `<div style="font-size: 0.74rem; color: #059669; font-weight: 600;">
-                Desc. ${descontoAplicadoPct.toFixed(1).replace('.0', '')}%${isAdmin ? ' s/ lucro' : ''} (-${formatarMoeda(descontoAplicadoValor)})
-               </div>`
-            : '';
-
-          return `
-            <tr style="${vencida ? 'background-color: #fef2f2;' : ''}">
-              <td><strong>#${v.id.slice(-4)}</strong><br><span style="font-size: 0.78rem; color: #64748b;">${v.data}</span></td>
-              <td>${v.cliente || 'Consumidor Final'}</td>
-              <td style="max-width: 240px;">${resumoItens}</td>
-              <td>
-                <span style="font-size: 0.85rem;">${formatarPagamentoExibicao(v.pagamento)}</span>
-                ${vencInfo}
-              </td>
-              <td>
-                <strong style="${vencida ? 'color: #dc2626;' : ''}">${formatarMoeda(valorExibicao)}</strong>
-                ${infoDescontoHtml}
-                ${vencida ? `<div style="font-size: 0.72rem; color: #dc2626;">c/ multa 1%</div>` : ''}
-              </td>
-              <td>
-                <select class="status-select ${statusBadgeClass}" data-change-status="${v.id}">
-                  <option value="Em separação" ${v.status === 'Em separação' ? 'selected' : ''}>📦 Em separação</option>
-                  <option value="Em entrega" ${v.status === 'Em entrega' ? 'selected' : ''}>🚚 Em entrega</option>
-                  <option value="Aguardando pagamento" ${v.status === 'Aguardando pagamento' ? 'selected' : ''}>⏳ Aguardando pagamento</option>
-                  <option value="Concluída" ${v.status === 'Concluída' ? 'selected' : ''}>✅ Concluída</option>
-                </select>
-              </td>
-              <td>${v.vendedorNome || '-'}</td>
-              ${isAdmin ? `
-                <td>
-                  <button class="btn-danger-sm" data-cancel-sale="${v.id}" title="Cancelar venda e devolver estoque">Estornar</button>
-                </td>
-              ` : ''}
-            </tr>
-          `;
-        }).join('');
+    const contadorHistoricoTexto = temFiltroAtivo
+      ? `${vendasFiltradas.length} de ${vendasExibidas.length}`
+      : `${vendasExibidas.length}`;
 
     return `
       <div class="dashboard-split" style="margin-bottom: 1.5rem;">
@@ -309,20 +500,72 @@ export const VendasModule = {
           <h3 style="margin-bottom: 1rem;">1. Selecionar Produtos</h3>
           <div id="sale-msg" class="error-msg hidden"></div>
 
-          <form id="add-item-form">
-            <div class="form-group">
-              <label for="s-produto">Produto em Estoque</label>
-              <select id="s-produto" required>
-                ${optionsProdutos}
+          <form id="add-item-form" style="display: flex; flex-direction: column; gap: 0.85rem;">
+            <div class="form-group" style="margin-bottom: 0; width: 100%;">
+              <label for="s-categoria" style="display: block; margin-bottom: 0.35rem;">1º Categoria</label>
+              <select
+                id="s-categoria"
+                style="width: 100%; height: 42px; padding: 0 0.75rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.92rem; box-sizing: border-box; background-color: #fff;"
+                ${produtosDisponiveis.length === 0 ? 'disabled' : ''}
+              >
+                <option value="" ${!categoriaSelecionadaVenda ? 'selected' : ''}></option>
+                ${optionsCategorias}
               </select>
             </div>
 
-            <div class="form-group">
-              <label for="s-qtd">Quantidade</label>
-              <input type="number" id="s-qtd" min="1" value="1" required>
+            <div class="form-group" style="margin-bottom: 0; width: 100%;">
+              <label for="s-produto" style="display: block; margin-bottom: 0.35rem;">2º Produto em Estoque</label>
+              <select
+                id="s-produto"
+                required
+                style="width: 100%; height: 42px; padding: 0 0.75rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.92rem; box-sizing: border-box; background-color: #fff;"
+                ${produtosDisponiveis.length === 0 ? 'disabled' : ''}
+              >
+                ${optionsProdutos}
+              </select>
+              <div id="product-stock-info" class="hidden" style="margin-top: 0.4rem; font-size: 0.83rem; font-weight: 600; color: #0369a1; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 0.4rem 0.65rem; box-sizing: border-box;"></div>
             </div>
 
-            <button type="submit" class="btn-primary">+ Adicionar ao Pedido</button>
+            <div class="form-group" style="margin-bottom: 0; width: 100%;">
+              <label for="s-qtd" style="display: block; margin-bottom: 0.35rem;">3º Quantidade</label>
+              <input
+                type="number"
+                id="s-qtd"
+                min="1"
+                value=""
+                required
+                style="width: 100%; height: 42px; padding: 0 0.75rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.92rem; box-sizing: border-box; background-color: #fff;"
+                ${produtosDisponiveis.length === 0 ? 'disabled' : ''}
+              >
+            </div>
+
+            <button
+              type="submit"
+              class="btn-primary"
+              style="width: 100%; height: 42px; margin-top: 0.25rem; box-sizing: border-box; ${produtosDisponiveis.length === 0 ? 'opacity: 0.5; cursor: not-allowed;' : ''}"
+              ${produtosDisponiveis.length === 0 ? 'disabled' : ''}
+            >
+              + Adicionar ao Pedido
+            </button>
+
+            <!-- Pré-visualização da imagem do produto selecionado -->
+            <div
+              id="selected-product-image-box"
+              class="hidden"
+              style="margin-top: 0.25rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem; align-items: center; gap: 0.85rem;"
+            >
+              <img
+                id="selected-product-image-src"
+                src=""
+                alt="Imagem do produto selecionado"
+                style="width: 96px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid #cbd5e1; background: #ffffff; flex-shrink: 0;"
+              >
+              <div style="min-width: 0; flex: 1;">
+                <span id="selected-product-image-sku" style="display: inline-block; font-size: 0.74rem; font-weight: 700; color: #475569; background: #e2e8f0; padding: 0.12rem 0.45rem; border-radius: 5px; margin-bottom: 0.25rem;"></span>
+                <div id="selected-product-image-name" style="font-size: 0.92rem; font-weight: 700; color: #0f172a; line-height: 1.3; margin-bottom: 0.25rem; word-break: break-word;"></div>
+                <div id="selected-product-image-price" style="font-size: 0.95rem; font-weight: 800; color: #059669;"></div>
+              </div>
+            </div>
           </form>
         </div>
 
@@ -389,10 +632,10 @@ export const VendasModule = {
               <div class="form-group" style="margin-bottom: 0;">
                 <label for="s-status">Status Inicial do Pedido</label>
                 <select id="s-status">
-                  <option value="Concluída">✅ Concluída</option>
-                  <option value="Em separação">📦 Em separação</option>
-                  <option value="Em entrega">🚚 Em entrega</option>
-                  <option value="Aguardando pagamento">⏳ Aguardando pagamento</option>
+                <option value="Em separação" selected>📦 Em separação</option>
+                <option value="Em entrega">🚚 Em entrega</option>
+                <option value="Aguardando pagamento">⏳ Aguardando pagamento</option>
+                <option value="Concluída">✅ Concluída</option>
                 </select>
               </div>
             </div>
@@ -437,7 +680,26 @@ export const VendasModule = {
       </div>
 
       <div class="card">
-        <h3 style="margin-bottom: 1rem;">Histórico de Vendas (${vendasExibidas.length})</h3>
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+          <h3 style="margin: 0;">Histórico de Vendas (<span id="sales-history-count">${contadorHistoricoTexto}</span>)</h3>
+          <div style="display: flex; align-items: center; gap: 0.5rem; flex: 1; max-width: 380px; min-width: 240px;">
+            <input
+              type="search"
+              id="sales-history-search"
+              value="${escaparHtml(filtroHistoricoVendas)}"
+              placeholder="Pesquisar pedido, cliente, produto, status..."
+              style="width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.88rem;"
+            >
+            <button
+              type="button"
+              id="btn-clear-sales-search"
+              class="btn-secondary ${temFiltroAtivo ? '' : 'hidden'}"
+              style="padding: 0.48rem 0.75rem; font-size: 0.82rem; white-space: nowrap;"
+            >
+              Limpar
+            </button>
+          </div>
+        </div>
         <div class="table-wrapper">
           <table class="data-table">
             <thead>
@@ -445,6 +707,7 @@ export const VendasModule = {
                 <th>Pedido / Data</th>
                 <th>Cliente</th>
                 <th>Itens</th>
+                <th>Qtd</th>
                 <th>Pagamento</th>
                 <th>Total</th>
                 <th>Status</th>
@@ -452,10 +715,50 @@ export const VendasModule = {
                 ${isAdmin ? '<th>Ações</th>' : ''}
               </tr>
             </thead>
-            <tbody>
+            <tbody id="sales-history-tbody">
               ${linhasHistorico}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- Pop-up de Histórico Completo do Pedido -->
+      <div id="order-history-modal" class="modal-overlay hidden">
+        <div id="order-history-modal-box" class="modal-box" style="max-width: 620px; width: 95%; border-top: 5px solid #2563eb;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.9rem;">
+            <div>
+              <h3 id="order-history-modal-title" style="margin: 0; color: #1e3a8a;">Histórico do Pedido</h3>
+              <p id="order-history-modal-subtitle" style="font-size: 0.82rem; color: #64748b; margin: 0.2rem 0 0 0;"></p>
+            </div>
+            <button type="button" id="btn-close-order-history-x" class="btn-secondary" style="padding: 0.35rem 0.7rem;">✕</button>
+          </div>
+
+          <div id="order-history-modal-content" style="max-height: 70vh; overflow-y: auto; padding-right: 0.15rem;"></div>
+
+          <div style="display: flex; justify-content: flex-end; margin-top: 1rem;">
+            <button type="button" id="btn-close-order-history" class="btn-primary" style="margin-top: 0; width: auto;">Fechar</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pop-up de Confirmação de Estorno de Venda -->
+      <div id="cancel-sale-confirm-modal" class="modal-overlay hidden">
+        <div class="modal-box" style="max-width: 480px; width: 95%; border-top: 5px solid #ef4444;">
+          <div style="display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.85rem;">
+            <span style="font-size: 1.65rem;">⚠️</span>
+            <div>
+              <h3 style="color: #b91c1c; margin: 0;">Confirmar Estorno da Venda</h3>
+              <p style="font-size: 0.82rem; color: #64748b; margin: 0;">Esta ação não poderá ser desfeita</p>
+            </div>
+          </div>
+
+          <div id="cancel-sale-confirm-details" style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 0.9rem; margin-bottom: 1.15rem; font-size: 0.9rem; color: #7f1d1d;">
+          </div>
+
+          <div style="display: flex; gap: 0.65rem; justify-content: flex-end;">
+            <button type="button" id="btn-cancel-sale-abort" class="btn-secondary">Cancelar</button>
+            <button type="button" id="btn-cancel-sale-confirm" class="btn-primary" style="margin-top: 0; width: auto; background: #dc2626;">✓ Confirmar Estorno</button>
+          </div>
         </div>
       </div>
 
@@ -494,7 +797,109 @@ export const VendasModule = {
       msgBox.classList.remove('hidden');
     };
 
-    // Pop-up e banner de alerta quando cliente selecionado estiver em atraso ou com contas a pagar
+    const selCategoria = document.getElementById('s-categoria');
+    const selProduto = document.getElementById('s-produto');
+    const inpQtd = document.getElementById('s-qtd');
+    const infoEstoqueProduto = document.getElementById('product-stock-info');
+    const boxImagemProduto = document.getElementById('selected-product-image-box');
+    const imgProdutoSelecionado = document.getElementById('selected-product-image-src');
+    const skuProdutoSelecionado = document.getElementById('selected-product-image-sku');
+    const nomeProdutoSelecionado = document.getElementById('selected-product-image-name');
+    const precoProdutoSelecionado = document.getElementById('selected-product-image-price');
+
+    const atualizarImagemProdutoSelecionado = (produto) => {
+      if (!boxImagemProduto || !imgProdutoSelecionado) return;
+
+      if (produto && produto.imagem) {
+        imgProdutoSelecionado.src = produto.imagem;
+        if (skuProdutoSelecionado) skuProdutoSelecionado.textContent = `Cód. ${produto.sku || '-'}`;
+        if (nomeProdutoSelecionado) nomeProdutoSelecionado.textContent = produto.nome || '';
+        if (precoProdutoSelecionado) precoProdutoSelecionado.textContent = formatarMoeda(produto.venda || 0);
+        boxImagemProduto.classList.remove('hidden');
+        boxImagemProduto.style.display = 'flex';
+      } else {
+        imgProdutoSelecionado.src = '';
+        boxImagemProduto.classList.add('hidden');
+        boxImagemProduto.style.display = 'none';
+      }
+    };
+
+    const atualizarInfoEstoqueELimite = () => {
+      if (!selProduto || !inpQtd) return;
+      const prodId = selProduto.value;
+
+      if (!prodId) {
+        inpQtd.removeAttribute('max');
+        if (infoEstoqueProduto) {
+          infoEstoqueProduto.textContent = '';
+          infoEstoqueProduto.classList.add('hidden');
+        }
+        atualizarImagemProdutoSelecionado(null);
+        return;
+      }
+
+      const produto = (Store.getCollection('produtos') || []).find(p => String(p.id) === String(prodId));
+      if (produto) {
+        const estoqueTotal = Number(produto.estoque || 0);
+        const itemNoCarrinho = carrinhoAtual.find(item => String(item.produtoId) === String(prodId));
+        const qtdNoCarrinho = itemNoCarrinho ? Number(itemNoCarrinho.qtd || 0) : 0;
+        const disponivelReal = Math.max(0, estoqueTotal - qtdNoCarrinho);
+
+        if (disponivelReal > 0) {
+          inpQtd.max = String(disponivelReal);
+          if (inpQtd.value !== '' && Number(inpQtd.value) > disponivelReal) {
+            inpQtd.value = String(disponivelReal);
+          }
+        } else {
+          inpQtd.removeAttribute('max');
+        }
+
+        if (infoEstoqueProduto) {
+          const detalheCarrinho = qtdNoCarrinho > 0 ? ` (${qtdNoCarrinho} já no pedido)` : '';
+          infoEstoqueProduto.textContent = `📦 Estoque disponível: ${disponivelReal} un.${detalheCarrinho}`;
+          infoEstoqueProduto.style.background = disponivelReal > 0 ? '#f0f9ff' : '#fef2f2';
+          infoEstoqueProduto.style.borderColor = disponivelReal > 0 ? '#bae6fd' : '#fecaca';
+          infoEstoqueProduto.style.color = disponivelReal > 0 ? '#0369a1' : '#b91c1c';
+          infoEstoqueProduto.classList.remove('hidden');
+        }
+
+        atualizarImagemProdutoSelecionado(produto);
+      } else {
+        inpQtd.removeAttribute('max');
+        if (infoEstoqueProduto) {
+          infoEstoqueProduto.textContent = '';
+          infoEstoqueProduto.classList.add('hidden');
+        }
+        atualizarImagemProdutoSelecionado(null);
+      }
+    };
+
+    if (selCategoria && selProduto) {
+      selCategoria.addEventListener('change', () => {
+        categoriaSelecionadaVenda = selCategoria.value;
+        const produtosDisponiveis = (Store.getCollection('produtos') || []).filter(p => Number(p.estoque) > 0);
+        selProduto.innerHTML = gerarOptionsProdutosPorCategoria(produtosDisponiveis, categoriaSelecionadaVenda);
+        if (inpQtd) {
+          inpQtd.value = '';
+          inpQtd.removeAttribute('max');
+        }
+        if (infoEstoqueProduto) {
+          infoEstoqueProduto.textContent = '';
+          infoEstoqueProduto.classList.add('hidden');
+        }
+        atualizarImagemProdutoSelecionado(null);
+        if (msgBox) msgBox.classList.add('hidden');
+      });
+    }
+
+    if (selProduto) {
+      selProduto.addEventListener('change', () => {
+        if (inpQtd) inpQtd.value = '';
+        atualizarInfoEstoqueELimite();
+        if (msgBox) msgBox.classList.add('hidden');
+      });
+    }
+
     const selCliente = document.getElementById('s-cliente');
     const bannerCliente = document.getElementById('client-payable-banner');
     const modalAtraso = document.getElementById('overdue-client-modal');
@@ -647,6 +1052,7 @@ export const VendasModule = {
           });
         }
 
+        categoriaSelecionadaVenda = '';
         if (refreshCallback) refreshCallback();
       });
     }
@@ -662,7 +1068,6 @@ export const VendasModule = {
       });
     });
 
-    // Sincronização bidirecional entre Desconto (%) e Valor de Venda Final (R$) com limite de 50% (admin) ou 40% (vendedor)
     const inpDesconto = document.getElementById('s-desconto');
     const inpValorFinal = document.getElementById('s-valor-final');
     const alertLimite = document.getElementById('discount-limit-alert');
@@ -702,7 +1107,6 @@ export const VendasModule = {
       if (elProfitFinal) elProfitFinal.textContent = `Lucro líquido final: ${formatarMoeda(lucroFinal)}`;
     };
 
-    // 1) Quando digita o percentual de desconto -> preenche Valor de Venda Final
     if (inpDesconto) {
       inpDesconto.addEventListener('input', () => {
         if (carrinhoAtual.length === 0) return;
@@ -736,7 +1140,6 @@ export const VendasModule = {
       });
     }
 
-    // 2) Quando digita o Valor de Venda Final -> preenche automaticamente o percentual de desconto
     if (inpValorFinal) {
       inpValorFinal.addEventListener('input', () => {
         if (carrinhoAtual.length === 0) return;
@@ -803,7 +1206,6 @@ export const VendasModule = {
       });
     }
 
-    // Exibe campo de vencimento e ajusta status automaticamente quando selecionar "A Prazo"
     const selPagamento = document.getElementById('s-pagamento');
     const selStatus = document.getElementById('s-status');
     const wrapVencimento = document.getElementById('wrap-vencimento');
@@ -816,7 +1218,7 @@ export const VendasModule = {
         } else {
           wrapVencimento.classList.add('hidden');
           if (selStatus.value === 'Aguardando pagamento') {
-            selStatus.value = 'Concluída';
+            selStatus.value = 'Em separação';
           }
         }
       });
@@ -841,7 +1243,6 @@ export const VendasModule = {
           return;
         }
 
-        // Valida novamente estoque antes de baixar
         const produtosAtuais = Store.getCollection('produtos');
         for (const item of carrinhoAtual) {
           const prod = produtosAtuais.find(p => p.id === item.produtoId);
@@ -851,7 +1252,6 @@ export const VendasModule = {
           }
         }
 
-        // Baixa estoque dos produtos vendidos
         carrinhoAtual.forEach(item => {
           const prod = produtosAtuais.find(p => p.id === item.produtoId);
           Store.updateItem('produtos', prod.id, {
@@ -867,10 +1267,65 @@ export const VendasModule = {
         const descontoValor = Number((lucroBruto * (descontoPct / 100)).toFixed(2));
         const total = Math.max(0, Number((subtotal - descontoValor).toFixed(2)));
 
-        const agora = new Date();
-        const dataFormatada = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-
+        const dataFormatada = obterDataHoraAtualBR();
         const quitado = !isPrazo && status !== 'Aguardando pagamento';
+
+        const historicoInicial = [
+          {
+            icone: '📝',
+            titulo: 'Solicitação do Pedido Registrada',
+            descricao: `Pedido aberto para ${cliente} • Pagamento: ${pagamento}${isPrazo && dataVencimento ? ` (Venc.: ${formatarDataBR(dataVencimento)})` : ''}.`,
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#2563eb'
+          }
+        ];
+
+        if (status === 'Em separação') {
+          historicoInicial.push({
+            icone: '📦',
+            titulo: 'Pedido em Separação',
+            descricao: 'Itens encaminhados para separação no estoque.',
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#d97706'
+          });
+        } else if (status === 'Em entrega') {
+          historicoInicial.push({
+            icone: '🚚',
+            titulo: 'Saiu para Entrega',
+            descricao: 'Pedido despachado para entrega ao cliente.',
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#0284c7'
+          });
+        } else if (status === 'Aguardando pagamento') {
+          historicoInicial.push({
+            icone: '⏳',
+            titulo: 'Aguardando Recebimento do Pagamento',
+            descricao: `Pagamento pendente (${pagamento})${dataVencimento ? ` • Vencimento em ${formatarDataBR(dataVencimento)}` : ''}.`,
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#d97706'
+          });
+        } else if (status === 'Concluída') {
+          historicoInicial.push({
+            icone: '💰',
+            titulo: 'Pagamento Recebido',
+            descricao: `Recebimento confirmado no ato via ${pagamento} (${formatarMoeda(total)}).`,
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#059669'
+          });
+          historicoInicial.push({
+            icone: '✅',
+            titulo: 'Pedido Finalizado no Sistema',
+            descricao: 'Pedido entregue e finalizado no ato da venda.',
+            dataHora: dataFormatada,
+            usuario: currentUser.nome,
+            cor: '#059669'
+          });
+        }
 
         Store.addItem('vendas', {
           data: dataFormatada,
@@ -879,6 +1334,9 @@ export const VendasModule = {
           dataVencimento,
           status,
           quitado,
+          dataConclusao: status === 'Concluída' ? dataFormatada : null,
+          usuarioConclusao: status === 'Concluída' ? currentUser.nome : null,
+          historicoStatus: historicoInicial,
           itens: [...carrinhoAtual],
           subtotal,
           lucroBruto,
@@ -895,58 +1353,372 @@ export const VendasModule = {
         descontoPercentualAtual = 0;
         ultimoClienteAlertado = '';
         clienteSelecionadoAtual = 'Consumidor Final';
+        categoriaSelecionadaVenda = '';
         if (refreshCallback) refreshCallback();
       });
     }
 
-    // Alterar status da venda diretamente no histórico
-    document.querySelectorAll('[data-change-status]').forEach(select => {
-      select.addEventListener('change', () => {
-        const vendaId = select.dataset.changeStatus;
-        const novoStatus = select.value;
-        const venda = Store.getCollection('vendas').find(v => v.id === vendaId);
+    // Pop-up de Histórico Completo do Pedido ao clicar no #XXXX
+    const modalHistPedido = document.getElementById('order-history-modal');
+    const modalHistBox = document.getElementById('order-history-modal-box');
+    const modalHistTitle = document.getElementById('order-history-modal-title');
+    const modalHistSubtitle = document.getElementById('order-history-modal-subtitle');
+    const modalHistContent = document.getElementById('order-history-modal-content');
+    const btnCloseHist = document.getElementById('btn-close-order-history');
+    const btnCloseHistX = document.getElementById('btn-close-order-history-x');
 
-        if (venda) {
-          const updates = { status: novoStatus };
-          if (novoStatus === 'Concluída') {
-            const vencida = verificarVendaVencida(venda);
-            const valorBase = Number(venda.valorOriginal ?? venda.total ?? 0);
-            const multa = vencida ? valorBase * 0.01 : 0;
+    const fecharModalHistoricoPedido = () => {
+      if (modalHistPedido) modalHistPedido.classList.add('hidden');
+    };
 
-            updates.quitado = true;
-            updates.valorOriginal = valorBase;
-            updates.multaAplicada = multa;
-            updates.total = valorBase + multa;
-          } else if (novoStatus === 'Aguardando pagamento') {
-            updates.quitado = false;
-          }
-          Store.updateItem('vendas', vendaId, updates);
-          if (refreshCallback) refreshCallback();
+    if (btnCloseHist) btnCloseHist.addEventListener('click', fecharModalHistoricoPedido);
+    if (btnCloseHistX) btnCloseHistX.addEventListener('click', fecharModalHistoricoPedido);
+    if (modalHistPedido) {
+      modalHistPedido.addEventListener('click', (e) => {
+        if (e.target === modalHistPedido) fecharModalHistoricoPedido();
+      });
+    }
+
+    const abrirModalHistoricoPedido = (vendaId) => {
+      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
+      if (!venda || !modalHistPedido || !modalHistContent) return;
+
+      const vencida = verificarVendaVencida(venda);
+      const valorBase = Number(venda.valorOriginal ?? venda.total ?? 0);
+      const valorAtual = vencida ? valorBase * 1.01 : Number(venda.total || 0);
+      const subtotal = Number(venda.subtotal ?? valorBase);
+      const descontoValor = Number(venda.descontoValor || 0);
+      const multaAplicada = Number(venda.multaAplicada || (vencida ? valorBase * 0.01 : 0));
+
+      let corTopo = '#2563eb';
+      if (venda.status === 'Concluída') corTopo = '#059669';
+      else if (venda.status === 'Aguardando pagamento' || venda.status === 'Em separação') corTopo = '#d97706';
+
+      if (modalHistBox) modalHistBox.style.borderTop = `5px solid ${corTopo}`;
+      if (modalHistTitle) {
+        modalHistTitle.textContent = `Histórico do Pedido #${String(venda.id).slice(-4)}`;
+        modalHistTitle.style.color = corTopo;
+      }
+      if (modalHistSubtitle) {
+        modalHistSubtitle.textContent = `Solicitado em ${venda.data || '-'} • Status atual: ${venda.status || '-'}`;
+      }
+
+      const timeline = construirLinhaDoTempoVenda(venda);
+      const timelineHtml = timeline.map((ev, idx) => {
+        const isUltimo = idx === timeline.length - 1;
+        return `
+          <div style="display: flex; gap: 0.75rem; position: relative; padding-bottom: ${isUltimo ? '0' : '1rem'};">
+            <div style="display: flex; flex-direction: column; align-items: center;">
+              <div style="width: 30px; height: 30px; border-radius: 50%; background: #f8fafc; border: 2px solid ${ev.cor}; display: flex; align-items: center; justify-content: center; font-size: 0.9rem; flex-shrink: 0;">
+                ${ev.icone}
+              </div>
+              ${!isUltimo ? `<div style="width: 2px; flex: 1; background: #cbd5e1; margin-top: 0.25rem;"></div>` : ''}
+            </div>
+            <div style="flex: 1; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 9px; padding: 0.6rem 0.8rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.2rem;">
+                <strong style="font-size: 0.88rem; color: #0f172a;">${escaparHtml(ev.titulo)}</strong>
+                <span style="font-size: 0.75rem; font-weight: 600; color: #475569; background: #e2e8f0; padding: 0.12rem 0.45rem; border-radius: 5px;">
+                  🕒 ${escaparHtml(ev.dataHora)}
+                </span>
+              </div>
+              ${ev.descricao ? `<div style="font-size: 0.82rem; color: #334155; margin-bottom: 0.2rem;">${escaparHtml(ev.descricao)}</div>` : ''}
+              <div style="font-size: 0.74rem; color: #64748b;">
+                Responsável: <strong>${escaparHtml(ev.usuario)}</strong>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const itens = Array.isArray(venda.itens) ? venda.itens : [];
+      const linhasItensHtml = itens.length === 0
+        ? `<tr><td colspan="4" style="text-align: center; color: #64748b;">Nenhum item registrado.</td></tr>`
+        : itens.map(i => `
+            <tr>
+              <td><strong>${escaparHtml(i.sku || '-')}</strong> - ${escaparHtml(i.nome)}</td>
+              <td>${i.qtd} un.</td>
+              <td>${formatarMoeda(i.preco)}</td>
+              <td><strong>${formatarMoeda(Number(i.preco || 0) * Number(i.qtd || 0))}</strong></td>
+            </tr>
+          `).join('');
+
+      modalHistContent.innerHTML = `
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem 0.9rem; margin-bottom: 1rem; font-size: 0.85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem;">
+          <div>
+            <span style="color: #64748b; font-size: 0.75rem; display: block;">Cliente</span>
+            <strong>${escaparHtml(venda.cliente || 'Consumidor Final')}</strong>
+          </div>
+          <div>
+            <span style="color: #64748b; font-size: 0.75rem; display: block;">Pagamento</span>
+            <strong>${escaparHtml(formatarPagamentoExibicao(venda.pagamento))}</strong>
+            ${venda.dataVencimento ? `<div style="font-size: 0.76rem; color: ${vencida ? '#dc2626' : '#b45309'};">Venc.: ${formatarDataBR(venda.dataVencimento)}</div>` : ''}
+          </div>
+          <div>
+            <span style="color: #64748b; font-size: 0.75rem; display: block;">Vendedor</span>
+            <strong>${escaparHtml(venda.vendedorNome || '-')}</strong>
+          </div>
+        </div>
+
+        <h4 style="margin: 0 0 0.65rem 0; font-size: 0.92rem; color: #1e293b;">Linha do Tempo da Compra</h4>
+        <div style="margin-bottom: 1.1rem;">
+          ${timelineHtml}
+        </div>
+
+        <h4 style="margin: 0 0 0.5rem 0; font-size: 0.92rem; color: #1e293b;">Itens do Pedido</h4>
+        <div class="table-wrapper" style="margin-bottom: 0.85rem;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Produto</th>
+                <th>Qtd</th>
+                <th>Unit.</th>
+                <th>Subtotal</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${linhasItensHtml}
+            </tbody>
+          </table>
+        </div>
+
+        <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0.75rem 0.9rem; font-size: 0.85rem;">
+          ${descontoValor > 0 ? `
+            <div style="display: flex; justify-content: space-between; color: #475569; margin-bottom: 0.2rem;">
+              <span>Subtotal dos itens:</span>
+              <span>${formatarMoeda(subtotal)}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; color: #059669; font-weight: 600; margin-bottom: 0.2rem;">
+              <span>Desconto aplicado:</span>
+              <span>- ${formatarMoeda(descontoValor)}</span>
+            </div>
+          ` : ''}
+          ${multaAplicada > 0 ? `
+            <div style="display: flex; justify-content: space-between; color: #dc2626; font-weight: 600; margin-bottom: 0.2rem;">
+              <span>Multa por atraso (1%):</span>
+              <span>+ ${formatarMoeda(multaAplicada)}</span>
+            </div>
+          ` : ''}
+          <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.25rem; border-top: ${descontoValor > 0 || multaAplicada > 0 ? '1px dashed #cbd5e1' : 'none'};">
+            <strong>Valor Total:</strong>
+            <span style="font-size: 1.15rem; font-weight: 800; color: ${corTopo};">${formatarMoeda(valorAtual)}</span>
+          </div>
+        </div>
+      `;
+
+      modalHistPedido.classList.remove('hidden');
+    };
+
+    // Modal de confirmação de estorno
+    const modalEstorno = document.getElementById('cancel-sale-confirm-modal');
+    const modalEstornoDetalhes = document.getElementById('cancel-sale-confirm-details');
+    const btnAbortarEstorno = document.getElementById('btn-cancel-sale-abort');
+    const btnConfirmarEstorno = document.getElementById('btn-cancel-sale-confirm');
+    let vendaIdParaEstornar = null;
+
+    const fecharModalEstorno = () => {
+      vendaIdParaEstornar = null;
+      if (modalEstorno) modalEstorno.classList.add('hidden');
+    };
+
+    const executarEstornoVenda = (vendaId) => {
+      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
+      if (!venda) return;
+
+      const produtosAtuais = Store.getCollection('produtos') || [];
+      (venda.itens || []).forEach(item => {
+        const prod = produtosAtuais.find(p => String(p.id) === String(item.produtoId));
+        if (prod) {
+          Store.updateItem('produtos', prod.id, {
+            estoque: Number(prod.estoque || 0) + Number(item.qtd || 0)
+          });
         }
       });
-    });
 
-    // Estornar venda (Admin) -> devolve itens ao estoque
-    if (isAdmin) {
-      document.querySelectorAll('[data-cancel-sale]').forEach(btn => {
+      Store.removeItem('vendas', venda.id);
+      if (refreshCallback) refreshCallback();
+    };
+
+    if (btnAbortarEstorno) btnAbortarEstorno.addEventListener('click', fecharModalEstorno);
+    if (modalEstorno) {
+      modalEstorno.addEventListener('click', (e) => {
+        if (e.target === modalEstorno) fecharModalEstorno();
+      });
+    }
+    if (btnConfirmarEstorno) {
+      btnConfirmarEstorno.addEventListener('click', () => {
+        if (!vendaIdParaEstornar) return;
+        const idAlvo = vendaIdParaEstornar;
+        fecharModalEstorno();
+        executarEstornoVenda(idAlvo);
+      });
+    }
+
+    const abrirConfirmacaoEstorno = (vendaId) => {
+      const venda = (Store.getCollection('vendas') || []).find(v => String(v.id) === String(vendaId));
+      if (!venda || !modalEstorno || !modalEstornoDetalhes) return;
+
+      vendaIdParaEstornar = venda.id;
+      const resumoItens = (venda.itens || []).map(i => `${i.qtd}x ${escaparHtml(i.nome)}`).join(', ');
+
+      modalEstornoDetalhes.innerHTML = `
+        <p style="margin: 0 0 0.4rem 0;">Deseja realmente estornar o pedido <strong>#${escaparHtml(String(venda.id).slice(-4))}</strong>?</p>
+        <p style="margin: 0 0 0.35rem 0; font-size: 0.85rem;"><strong>Cliente:</strong> ${escaparHtml(venda.cliente || 'Consumidor Final')}</p>
+        <p style="margin: 0 0 0.35rem 0; font-size: 0.85rem;"><strong>Valor:</strong> ${formatarMoeda(venda.total)}</p>
+        <p style="margin: 0 0 0.55rem 0; font-size: 0.84rem;"><strong>Itens:</strong> ${resumoItens || '-'}</p>
+        <div style="padding-top: 0.45rem; border-top: 1px dashed #fca5a5; font-size: 0.82rem; font-weight: 600;">
+          📦 Os itens desta venda serão devolvidos automaticamente ao estoque e o registro será removido do histórico.
+        </div>
+      `;
+
+      modalEstorno.classList.remove('hidden');
+    };
+
+    // Vincula eventos das linhas do histórico (abrir timeline do pedido, mudança de status e estorno)
+    const vincularEventosTabelaHistorico = () => {
+      document.querySelectorAll('[data-open-order-history]').forEach(btn => {
         btn.addEventListener('click', () => {
-          const vendaId = btn.dataset.cancelSale;
-          const venda = Store.getCollection('vendas').find(v => v.id === vendaId);
-          if (!venda) return;
+          abrirModalHistoricoPedido(btn.dataset.openOrderHistory);
+        });
+      });
 
-          const produtosAtuais = Store.getCollection('produtos');
-          (venda.itens || []).forEach(item => {
-            const prod = produtosAtuais.find(p => p.id === item.produtoId);
-            if (prod) {
-              Store.updateItem('produtos', prod.id, {
-                estoque: Number(prod.estoque) + item.qtd
+      document.querySelectorAll('[data-change-status]').forEach(select => {
+        select.addEventListener('change', () => {
+          const vendaId = select.dataset.changeStatus;
+          const novoStatus = select.value;
+          const venda = Store.getCollection('vendas').find(v => v.id === vendaId);
+
+          if (venda) {
+            const dataAgora = obterDataHoraAtualBR();
+            const historicoAtual = Array.isArray(venda.historicoStatus) && venda.historicoStatus.length > 0
+              ? [...venda.historicoStatus]
+              : construirLinhaDoTempoVenda(venda);
+
+            const updates = {
+              status: novoStatus,
+              dataAtualizacao: dataAgora
+            };
+
+            if (novoStatus === 'Em separação') {
+              historicoAtual.push({
+                icone: '📦',
+                titulo: 'Em Separação',
+                descricao: 'Pedido movido para separação no estoque.',
+                dataHora: dataAgora,
+                usuario: currentUser.nome,
+                cor: '#d97706'
+              });
+            } else if (novoStatus === 'Em entrega') {
+              historicoAtual.push({
+                icone: '🚚',
+                titulo: 'Saiu para Entrega',
+                descricao: 'Pedido despachado para entrega ao cliente.',
+                dataHora: dataAgora,
+                usuario: currentUser.nome,
+                cor: '#0284c7'
+              });
+            } else if (novoStatus === 'Aguardando pagamento') {
+              updates.quitado = false;
+              historicoAtual.push({
+                icone: '⏳',
+                titulo: 'Aguardando Recebimento do Pagamento',
+                descricao: `Status alterado para aguardando pagamento (${formatarPagamentoExibicao(venda.pagamento)}).`,
+                dataHora: dataAgora,
+                usuario: currentUser.nome,
+                cor: '#d97706'
+              });
+            } else if (novoStatus === 'Concluída') {
+              const vencida = verificarVendaVencida(venda);
+              const valorBase = Number(venda.valorOriginal ?? venda.total ?? 0);
+              const multa = vencida ? valorBase * 0.01 : 0;
+              const valorFinalQuitado = valorBase + multa;
+
+              updates.quitado = true;
+              updates.valorOriginal = valorBase;
+              updates.multaAplicada = multa;
+              updates.total = valorFinalQuitado;
+              updates.dataConclusao = dataAgora;
+              updates.usuarioConclusao = currentUser.nome;
+
+              historicoAtual.push({
+                icone: '💰',
+                titulo: 'Pagamento Recebido',
+                descricao: `Recebimento de ${formatarMoeda(valorFinalQuitado)} confirmado via ${formatarPagamentoExibicao(venda.pagamento)}${multa > 0 ? ` (inclui multa de ${formatarMoeda(multa)})` : ''}.`,
+                dataHora: dataAgora,
+                usuario: currentUser.nome,
+                cor: '#059669'
+              });
+
+              historicoAtual.push({
+                icone: '✅',
+                titulo: 'Pedido Finalizado no Sistema',
+                descricao: 'Entrega e pagamento concluídos e encerrados no sistema.',
+                dataHora: dataAgora,
+                usuario: currentUser.nome,
+                cor: '#059669'
               });
             }
-          });
 
-          Store.removeItem('vendas', vendaId);
-          if (refreshCallback) refreshCallback();
+            updates.historicoStatus = historicoAtual;
+            Store.updateItem('vendas', vendaId, updates);
+            if (refreshCallback) refreshCallback();
+          }
         });
+      });
+
+      if (isAdmin) {
+        document.querySelectorAll('[data-cancel-sale]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            abrirConfirmacaoEstorno(btn.dataset.cancelSale);
+          });
+        });
+      }
+    };
+
+    vincularEventosTabelaHistorico();
+
+    const inpBuscaHistorico = document.getElementById('sales-history-search');
+    const btnLimparBuscaHistorico = document.getElementById('btn-clear-sales-search');
+    const tbodyHistorico = document.getElementById('sales-history-tbody');
+    const contadorHistorico = document.getElementById('sales-history-count');
+
+    const aplicarFiltroHistoricoUI = () => {
+      const todasVendas = Store.getCollection('vendas') || [];
+      const vendasBase = isAdmin
+        ? todasVendas
+        : todasVendas.filter(v => v.vendedorId === currentUser.id);
+
+      const filtradas = filtrarVendasHistorico(vendasBase, filtroHistoricoVendas);
+      const temFiltro = filtroHistoricoVendas.trim().length > 0;
+
+      if (tbodyHistorico) {
+        tbodyHistorico.innerHTML = renderizarLinhasHistorico(filtradas, isAdmin, temFiltro);
+        vincularEventosTabelaHistorico();
+      }
+
+      if (contadorHistorico) {
+        contadorHistorico.textContent = temFiltro
+          ? `${filtradas.length} de ${vendasBase.length}`
+          : `${vendasBase.length}`;
+      }
+
+      if (btnLimparBuscaHistorico) {
+        btnLimparBuscaHistorico.classList.toggle('hidden', !temFiltro);
+      }
+    };
+
+    if (inpBuscaHistorico) {
+      inpBuscaHistorico.addEventListener('input', () => {
+        filtroHistoricoVendas = inpBuscaHistorico.value;
+        aplicarFiltroHistoricoUI();
+      });
+    }
+
+    if (btnLimparBuscaHistorico && inpBuscaHistorico) {
+      btnLimparBuscaHistorico.addEventListener('click', () => {
+        filtroHistoricoVendas = '';
+        inpBuscaHistorico.value = '';
+        aplicarFiltroHistoricoUI();
+        inpBuscaHistorico.focus();
       });
     }
   }

@@ -5,13 +5,15 @@ import { VendasModule } from './modules/vendas.js';
 import { ProdutosModule } from './modules/produtos.js';
 import { ClientesModule } from './modules/clientes.js';
 import { UsuariosModule } from './modules/usuarios.js';
+import { SuporteModule } from './modules/suporte.js';
 
 const modules = {
   dashboard: { title: 'Resumo Geral', instance: DashboardModule },
   vendas:    { title: 'Controle de Vendas', instance: VendasModule },
   produtos:  { title: 'Produtos & Estoque', instance: ProdutosModule },
   clientes:  { title: 'Base de Clientes', instance: ClientesModule },
-  usuarios:  { title: 'Gestão de Usuários', instance: UsuariosModule, role: 'admin' }
+  usuarios:  { title: 'Gestão de Usuários', instance: UsuariosModule, role: 'admin' },
+  suporte:   { title: 'Suporte', instance: SuporteModule }
 };
 
 const authView = document.getElementById('auth-view');

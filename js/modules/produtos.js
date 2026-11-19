@@ -17,6 +17,14 @@ function obterDataHoraAtual() {
   return `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 }
 
+function normalizarTextoBusca(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
 function gerarProximoCodigo(produtos) {
   let maiorNumero = 0;
 
@@ -54,6 +62,40 @@ function escaparHtml(texto) {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+// Redimensiona e comprime a imagem para caber com folga no localStorage
+function processarImagemParaBase64(file, maxLargura = 360, qualidade = 0.78) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) {
+      reject(new Error('Selecione um arquivo de imagem válido (JPG, PNG ou WebP).'));
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evento) => {
+      const img = new Image();
+      img.onload = () => {
+        const escala = Math.min(1, maxLargura / img.width);
+        const largura = Math.round(img.width * escala);
+        const altura = Math.round(img.height * escala);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = largura;
+        canvas.height = altura;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, largura, altura);
+
+        const base64Compactado = canvas.toDataURL('image/jpeg', qualidade);
+        resolve(base64Compactado);
+      };
+      img.onerror = () => reject(new Error('Não foi possível ler a imagem selecionada.'));
+      img.src = evento.target.result;
+    };
+    reader.onerror = () => reject(new Error('Erro ao carregar o arquivo de imagem.'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function renderizarCampoCategoriaHtml({ prefixo, categorias, valorSelecionado = '' }) {
@@ -129,7 +171,6 @@ function configurarCalculoMargemVenda(idCusto, idMargem, idVenda) {
 
   if (!inpCusto || !inpMargem || !inpVenda) return;
 
-  // Ao digitar a Margem de Lucro (%) -> preenche o Preço de Venda (R$) automaticamente
   inpMargem.addEventListener('input', () => {
     const custo = parseFloat(inpCusto.value);
     const margem = parseFloat(inpMargem.value);
@@ -143,7 +184,6 @@ function configurarCalculoMargemVenda(idCusto, idMargem, idVenda) {
     inpVenda.value = vendaCalculada.toFixed(2);
   });
 
-  // Ao digitar o Preço de Venda (R$) -> preenche a Margem de Lucro (%) automaticamente
   inpVenda.addEventListener('input', () => {
     const custo = parseFloat(inpCusto.value);
     const venda = parseFloat(inpVenda.value);
@@ -157,7 +197,6 @@ function configurarCalculoMargemVenda(idCusto, idMargem, idVenda) {
     inpMargem.value = margemCalculada.toFixed(2).replace(/\.00$/, '');
   });
 
-  // Ao alterar o Custo Unitário (R$) -> recalcula automaticamente mantendo a margem ou o preço informado
   inpCusto.addEventListener('input', () => {
     const custo = parseFloat(inpCusto.value);
     if (isNaN(custo) || custo <= 0) return;
@@ -174,7 +213,6 @@ function configurarCalculoMargemVenda(idCusto, idMargem, idVenda) {
   });
 }
 
-// Lê todos os registros salvos unificando Store + localStorage sem nunca perder dados
 function obterHistoricoEstoque() {
   let doStore = [];
   let doLocalNovo = [];
@@ -251,7 +289,7 @@ function registrarHistoricoEstoque({ produtoId, sku, nome, tipo, quantidade, sal
     sku: String(sku || ''),
     nome: String(nome || ''),
     data: obterDataHoraAtual(),
-    tipo, // 'entrada', 'saida', 'ajuste', 'cadastro'
+    tipo,
     quantidade: Number(quantidade || 0),
     saldoAnterior: Number(saldoAnterior || 0),
     saldoAtual: Number(saldoAtual || 0),
@@ -271,7 +309,6 @@ function registrarHistoricoEstoque({ produtoId, sku, nome, tipo, quantidade, sal
   return novoRegistro;
 }
 
-// Limpa o histórico de um produto específico (somente Admin) mantendo o saldo atual como marco base
 function limparHistoricoProduto(produto, nomeAdmin) {
   if (!produto) return;
 
@@ -299,7 +336,6 @@ function limparHistoricoProduto(produto, nomeAdmin) {
   persistirListaHistoricoCompleta(novaLista);
 }
 
-// Sincroniza movimentações feitas fora deste módulo (ex: baixas por venda ou estornos no módulo de Vendas)
 function sincronizarMovimentacoesExternas(produtos) {
   if (!Array.isArray(produtos) || produtos.length === 0) return obterHistoricoEstoque();
 
@@ -374,6 +410,98 @@ function sincronizarMovimentacoesExternas(produtos) {
 let abaAtivaProdutos = 'catalogo';
 let produtoEmEdicaoId = null;
 let produtoHistoricoId = null;
+let imagemNovaProdutoBase64 = '';
+let imagemEdicaoProdutoBase64 = '';
+
+// Estado dos filtros de pesquisa do catálogo
+let filtroBuscaProduto = '';
+let filtroCategoriaProduto = '';
+let filtroEstoqueProduto = 'todos'; // 'todos' | 'disponivel' | 'baixo' | 'zerado'
+
+function filtrarProdutosLista(produtos) {
+  const termo = normalizarTextoBusca(filtroBuscaProduto);
+  const catFiltro = normalizarTextoBusca(filtroCategoriaProduto);
+
+  return (produtos || []).filter(p => {
+    const skuNorm = normalizarTextoBusca(p.sku);
+    const nomeNorm = normalizarTextoBusca(p.nome);
+    const catNorm = normalizarTextoBusca(p.categoria);
+    const estoque = Number(p.estoque || 0);
+
+    if (termo && !skuNorm.includes(termo) && !nomeNorm.includes(termo) && !catNorm.includes(termo)) {
+      return false;
+    }
+
+    if (catFiltro && catNorm !== catFiltro) {
+      return false;
+    }
+
+    if (filtroEstoqueProduto === 'disponivel' && estoque <= 5) return false;
+    if (filtroEstoqueProduto === 'baixo' && (estoque <= 0 || estoque > 5)) return false;
+    if (filtroEstoqueProduto === 'zerado' && estoque > 0) return false;
+
+    return true;
+  });
+}
+
+function gerarLinhasTabelaProdutos(produtosFiltrados, totalCadastrados, isAdmin, todasMovimentacoes) {
+  if (totalCadastrados === 0) {
+    return `<tr><td colspan="${isAdmin ? 8 : 6}" style="text-align: center; color: #64748b; padding: 1.5rem;">Nenhum produto cadastrado no estoque.</td></tr>`;
+  }
+
+  if (produtosFiltrados.length === 0) {
+    return `<tr><td colspan="${isAdmin ? 8 : 6}" style="text-align: center; color: #64748b; padding: 1.5rem;">Nenhum produto encontrado com os filtros aplicados.</td></tr>`;
+  }
+
+  return produtosFiltrados.map(p => {
+    const margem = p.custo > 0 ? (((p.venda - p.custo) / p.custo) * 100).toFixed(1) : '0.0';
+    const estoqueBaixo = Number(p.estoque) <= 5;
+    const temImagem = Boolean(p.imagem);
+    const qtdMovsProduto = isAdmin
+      ? todasMovimentacoes.filter(m => String(m.produtoId) === String(p.id) || (p.sku && String(m.sku) === String(p.sku))).length
+      : 0;
+
+    return `
+      <tr>
+        <td><strong>${p.sku}</strong></td>
+        <td>
+          <span
+            class="product-name-hover"
+            ${temImagem ? `data-product-img="${escaparHtml(p.imagem)}" data-product-title="${escaparHtml(p.nome)}"` : ''}>
+            ${escaparHtml(p.nome)}
+          </span>
+        </td>
+        <td>${escaparHtml(p.categoria)}</td>
+        ${isAdmin ? `<td>${formatarMoeda(p.custo)}</td>` : ''}
+        <td>${formatarMoeda(p.venda)}</td>
+        ${isAdmin ? `<td><span class="badge badge-success">${margem}%</span></td>` : ''}
+        <td>
+          <span class="badge ${estoqueBaixo ? 'badge-danger' : 'badge-info'}">
+            ${p.estoque} un.
+          </span>
+        </td>
+        ${isAdmin ? `
+          <td style="white-space: nowrap;">
+            <button
+              type="button"
+              data-history-prod="${p.id}"
+              title="Ver histórico completo de movimentações deste produto"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem; font-weight: 600; border-radius: 6px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; cursor: pointer; margin-right: 0.35rem;">
+              Histórico${qtdMovsProduto > 0 ? ` (${qtdMovsProduto})` : ''}
+            </button>
+            <button
+              type="button"
+              data-edit-prod="${p.id}"
+              style="padding: 0.35rem 0.65rem; font-size: 0.78rem; font-weight: 600; border-radius: 6px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; cursor: pointer; margin-right: 0.35rem;">
+              Editar
+            </button>
+            <button type="button" class="btn-danger-sm" data-delete-prod="${p.id}">Excluir</button>
+          </td>
+        ` : ''}
+      </tr>
+    `;
+  }).join('');
+}
 
 export const ProdutosModule = {
   render() {
@@ -390,6 +518,13 @@ export const ProdutosModule = {
       produtoHistoricoId = null;
     }
 
+    if (filtroCategoriaProduto && !categoriasExistentes.some(c => c.toLowerCase() === filtroCategoriaProduto.toLowerCase())) {
+      filtroCategoriaProduto = '';
+    }
+
+    const produtosFiltrados = filtrarProdutosLista(produtos);
+    const temFiltroAtivo = Boolean(filtroBuscaProduto.trim() || filtroCategoriaProduto || filtroEstoqueProduto !== 'todos');
+
     const totalItens = produtos.reduce((acc, p) => acc + Number(p.estoque || 0), 0);
     const custoTotalEstoque = produtos.reduce((acc, p) => acc + (Number(p.custo || 0) * Number(p.estoque || 0)), 0);
     const valorPotencialVenda = produtos.reduce((acc, p) => acc + (Number(p.venda || 0) * Number(p.estoque || 0)), 0);
@@ -398,49 +533,12 @@ export const ProdutosModule = {
       ? `<option value="">Nenhum produto cadastrado</option>`
       : produtos.map(p => `<option value="${p.id}">${p.sku} - ${p.nome} (Atual: ${p.estoque})</option>`).join('');
 
-    const linhasTabela = produtos.length === 0
-      ? `<tr><td colspan="${isAdmin ? 8 : 6}" style="text-align: center; color: #64748b; padding: 1.5rem;">Nenhum produto cadastrado no estoque.</td></tr>`
-      : produtos.map(p => {
-          const margem = p.custo > 0 ? (((p.venda - p.custo) / p.custo) * 100).toFixed(1) : '0.0';
-          const estoqueBaixo = Number(p.estoque) <= 5;
-          const qtdMovsProduto = isAdmin
-            ? todasMovimentacoes.filter(m => String(m.produtoId) === String(p.id) || (p.sku && String(m.sku) === String(p.sku))).length
-            : 0;
+    const linhasTabela = gerarLinhasTabelaProdutos(produtosFiltrados, produtos.length, isAdmin, todasMovimentacoes);
 
-          return `
-            <tr>
-              <td><strong>${p.sku}</strong></td>
-              <td>${p.nome}</td>
-              <td>${p.categoria}</td>
-              ${isAdmin ? `<td>${formatarMoeda(p.custo)}</td>` : ''}
-              <td>${formatarMoeda(p.venda)}</td>
-              ${isAdmin ? `<td><span class="badge badge-success">${margem}%</span></td>` : ''}
-              <td>
-                <span class="badge ${estoqueBaixo ? 'badge-danger' : 'badge-info'}">
-                  ${p.estoque} un.
-                </span>
-              </td>
-              ${isAdmin ? `
-                <td style="white-space: nowrap;">
-                  <button
-                    type="button"
-                    data-history-prod="${p.id}"
-                    title="Ver histórico completo de movimentações deste produto"
-                    style="padding: 0.35rem 0.65rem; font-size: 0.78rem; font-weight: 600; border-radius: 6px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; cursor: pointer; margin-right: 0.35rem;">
-                    Histórico${qtdMovsProduto > 0 ? ` (${qtdMovsProduto})` : ''}
-                  </button>
-                  <button
-                    type="button"
-                    data-edit-prod="${p.id}"
-                    style="padding: 0.35rem 0.65rem; font-size: 0.78rem; font-weight: 600; border-radius: 6px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; cursor: pointer; margin-right: 0.35rem;">
-                    Editar
-                  </button>
-                  <button type="button" class="btn-danger-sm" data-delete-prod="${p.id}">Excluir</button>
-                </td>
-              ` : ''}
-            </tr>
-          `;
-        }).join('');
+    const optionsFiltroCategoria = categoriasExistentes.map(cat => {
+      const selected = cat.toLowerCase() === filtroCategoriaProduto.toLowerCase() ? 'selected' : '';
+      return `<option value="${escaparHtml(cat)}" ${selected}>${escaparHtml(cat)}</option>`;
+    }).join('');
 
     const estiloCaixinhaKpi = `
       background: #ffffff;
@@ -635,6 +733,8 @@ export const ProdutosModule = {
       const prodEdit = produtos.find(p => String(p.id) === String(produtoEmEdicaoId));
       if (prodEdit) {
         const margemAtualEdit = calcularMargemPct(prodEdit.custo, prodEdit.venda);
+        const temImagemEdit = Boolean(imagemEdicaoProdutoBase64);
+
         conteudoAbaHtml = `
           <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
@@ -654,9 +754,17 @@ export const ProdutosModule = {
                   valorSelecionado: prodEdit.categoria
                 })}
               </div>
-              <div class="form-group">
-                <label for="ep-nome">Nome do Produto</label>
-                <input type="text" id="ep-nome" required value="${escaparHtml(prodEdit.nome)}">
+              <div class="form-group" id="wrap-ep-nome">
+                <label for="ep-nome" style="display: flex; align-items: center; gap: 0.35rem;">
+                  Nome do Produto
+                  <span id="ep-nome-img-badge" class="${temImagemEdit ? '' : 'hidden'}" style="font-size: 0.76rem; color: #2563eb; font-weight: 600;">(🖼️ passe o cursor para ver a foto)</span>
+                </label>
+                <input
+                  type="text"
+                  id="ep-nome"
+                  required
+                  value="${escaparHtml(prodEdit.nome)}"
+                  style="${temImagemEdit ? 'border-color: #2563eb; background-color: #f8fafc;' : ''}">
               </div>
               <div class="form-grid">
                 <div class="form-group">
@@ -676,6 +784,20 @@ export const ProdutosModule = {
                   <input type="number" id="ep-estoque" min="0" required value="${Number(prodEdit.estoque || 0)}">
                 </div>
               </div>
+              <div class="form-group">
+                <label for="ep-imagem">Imagem do Produto (opcional)</label>
+                <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;">
+                  <input
+                    type="file"
+                    id="ep-imagem"
+                    accept="image/*"
+                    style="flex: 1; min-width: 240px; padding: 0.45rem; border: 1px solid var(--border); border-radius: 8px; background: #fff;">
+                  <div id="ep-imagem-preview-wrap" class="${temImagemEdit ? '' : 'hidden'}" style="display: ${temImagemEdit ? 'flex' : 'none'}; align-items: center; gap: 0.5rem; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 0.3rem 0.6rem;">
+                    <img id="ep-imagem-preview" src="${escaparHtml(imagemEdicaoProdutoBase64)}" alt="Pré-visualização" style="width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0;">
+                    <button type="button" id="btn-clear-edit-img" class="btn-danger-sm" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">Remover</button>
+                  </div>
+                </div>
+              </div>
               <div style="display: flex; gap: 0.65rem; margin-top: 0.5rem;">
                 <button type="submit" class="btn-primary">Salvar Alterações</button>
               </div>
@@ -690,6 +812,8 @@ export const ProdutosModule = {
 
     if (!conteudoAbaHtml) {
       if (isAdmin && abaAtivaProdutos === 'cadastrar') {
+        const temImagemNova = Boolean(imagemNovaProdutoBase64);
+
         conteudoAbaHtml = `
           <div class="card">
             <h3 style="margin-bottom: 1rem;">Cadastrar Novo Produto</h3>
@@ -705,9 +829,17 @@ export const ProdutosModule = {
                   categorias: categoriasExistentes
                 })}
               </div>
-              <div class="form-group">
-                <label for="p-nome">Nome do Produto</label>
-                <input type="text" id="p-nome" required placeholder="Ex: Headset Gamer">
+              <div class="form-group" id="wrap-p-nome">
+                <label for="p-nome" style="display: flex; align-items: center; gap: 0.35rem;">
+                  Nome do Produto
+                  <span id="p-nome-img-badge" class="${temImagemNova ? '' : 'hidden'}" style="font-size: 0.76rem; color: #2563eb; font-weight: 600;">(🖼️ passe o cursor para ver a imagem)</span>
+                </label>
+                <input
+                  type="text"
+                  id="p-nome"
+                  required
+                  placeholder="Ex: Headset Gamer"
+                  style="${temImagemNova ? 'border-color: #2563eb; background-color: #f8fafc;' : ''}">
               </div>
               <div class="form-grid">
                 <div class="form-group">
@@ -725,6 +857,20 @@ export const ProdutosModule = {
                 <div class="form-group">
                   <label for="p-estoque">Estoque Inicial</label>
                   <input type="number" id="p-estoque" min="0" required placeholder="0">
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="p-imagem">Imagem do Produto (opcional)</label>
+                <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;">
+                  <input
+                    type="file"
+                    id="p-imagem"
+                    accept="image/*"
+                    style="flex: 1; min-width: 240px; padding: 0.45rem; border: 1px solid var(--border); border-radius: 8px; background: #fff;">
+                  <div id="p-imagem-preview-wrap" class="${temImagemNova ? '' : 'hidden'}" style="display: ${temImagemNova ? 'flex' : 'none'}; align-items: center; gap: 0.5rem; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 0.3rem 0.6rem;">
+                    <img id="p-imagem-preview" src="${escaparHtml(imagemNovaProdutoBase64)}" alt="Pré-visualização" style="width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid #e2e8f0;">
+                    <button type="button" id="btn-clear-new-img" class="btn-danger-sm" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">Remover</button>
+                  </div>
                 </div>
               </div>
               <button type="submit" class="btn-primary">Salvar Produto</button>
@@ -767,7 +913,51 @@ export const ProdutosModule = {
       } else {
         conteudoAbaHtml = `
           <div class="card">
-            <h3 style="margin-bottom: 1rem;">Catálogo e Saldo de Estoque (${produtos.length})</h3>
+            <div class="toolbar-row" style="margin-bottom: 0.85rem;">
+              <h3 id="prod-catalog-title" style="margin: 0;">
+                Catálogo e Saldo de Estoque (${temFiltroAtivo ? `${produtosFiltrados.length} de ${produtos.length}` : produtos.length})
+              </h3>
+              ${temFiltroAtivo ? `
+                <button type="button" id="btn-clear-prod-filters" class="btn-secondary" style="padding: 0.42rem 0.8rem; font-size: 0.82rem;">
+                  ✕ Limpar filtros
+                </button>
+              ` : `
+                <button type="button" id="btn-clear-prod-filters" class="btn-secondary hidden" style="padding: 0.42rem 0.8rem; font-size: 0.82rem;">
+                  ✕ Limpar filtros
+                </button>
+              `}
+            </div>
+
+            <!-- Barra de Filtros e Pesquisa de Produtos -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-bottom: 1rem;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="prod-search-input">Pesquisar Produto</label>
+                <input
+                  type="search"
+                  id="prod-search-input"
+                  value="${escaparHtml(filtroBuscaProduto)}"
+                  placeholder="🔍 Buscar por código, nome ou categoria...">
+              </div>
+
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="prod-filter-categoria">Filtrar por Categoria</label>
+                <select id="prod-filter-categoria">
+                  <option value="">Todas as categorias</option>
+                  ${optionsFiltroCategoria}
+                </select>
+              </div>
+
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="prod-filter-estoque">Situação do Estoque</label>
+                <select id="prod-filter-estoque">
+                  <option value="todos" ${filtroEstoqueProduto === 'todos' ? 'selected' : ''}>Todos os itens</option>
+                  <option value="disponivel" ${filtroEstoqueProduto === 'disponivel' ? 'selected' : ''}>✅ Estoque normal (> 5 un.)</option>
+                  <option value="baixo" ${filtroEstoqueProduto === 'baixo' ? 'selected' : ''}>⚠️ Estoque baixo (1 a 5 un.)</option>
+                  <option value="zerado" ${filtroEstoqueProduto === 'zerado' ? 'selected' : ''}>🚫 Sem estoque (0 un.)</option>
+                </select>
+              </div>
+            </div>
+
             <div class="table-wrapper">
               <table class="data-table">
                 <thead>
@@ -782,7 +972,7 @@ export const ProdutosModule = {
                     ${isAdmin ? '<th>Ações</th>' : ''}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody id="prod-table-body">
                   ${linhasTabela}
                 </tbody>
               </table>
@@ -796,6 +986,19 @@ export const ProdutosModule = {
       ${kpisAdminHtml}
       ${submenuHtml}
       ${conteudoAbaHtml}
+
+      <!-- Tooltip flutuante com a imagem do produto ao passar o cursor -->
+      <div
+        id="product-image-hover-tooltip"
+        class="hidden"
+        style="position: fixed; z-index: 9999; pointer-events: none; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 0.55rem; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22); max-width: 230px; text-align: center;">
+        <img
+          id="product-image-hover-src"
+          src=""
+          alt="Foto do produto"
+          style="width: 200px; height: 200px; object-fit: cover; border-radius: 8px; display: block; margin-bottom: 0.4rem; background: #f8fafc;">
+        <div id="product-image-hover-caption" style="font-size: 0.8rem; font-weight: 700; color: #0f172a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+      </div>
     `;
   },
 
@@ -803,35 +1006,296 @@ export const ProdutosModule = {
     const currentUser = Store.getCurrentUser();
     const isAdmin = verificarIsAdmin(currentUser);
 
+    // Tooltip flutuante compartilhado (Catálogo, Cadastrar Novo Produto e Editar Produto)
+    const tooltip = document.getElementById('product-image-hover-tooltip');
+    const tooltipImg = document.getElementById('product-image-hover-src');
+    const tooltipCaption = document.getElementById('product-image-hover-caption');
+
+    const posicionarTooltip = (e) => {
+      if (!tooltip || tooltip.classList.contains('hidden')) return;
+      const offset = 16;
+      const larguraBox = 230;
+      const alturaBox = 250;
+
+      let left = e.clientX + offset;
+      let top = e.clientY + offset;
+
+      if (left + larguraBox > window.innerWidth - 12) {
+        left = e.clientX - larguraBox - offset;
+      }
+      if (top + alturaBox > window.innerHeight - 12) {
+        top = Math.max(12, window.innerHeight - alturaBox - 12);
+      }
+
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
+    };
+
+    const exibirTooltipImagem = (src, titulo, eventoMouse) => {
+      if (!src || !tooltip || !tooltipImg || !tooltipCaption) return;
+      tooltipImg.src = src;
+      tooltipCaption.textContent = titulo || 'Pré-visualização do Produto';
+      tooltip.classList.remove('hidden');
+      posicionarTooltip(eventoMouse);
+    };
+
+    const ocultarTooltipImagem = () => {
+      if (!tooltip) return;
+      tooltip.classList.add('hidden');
+    };
+
+    const vincularHoverProdutosTabela = () => {
+      document.querySelectorAll('.product-name-hover[data-product-img]').forEach(el => {
+        el.addEventListener('mouseenter', (e) => {
+          exibirTooltipImagem(el.dataset.productImg, el.dataset.productTitle, e);
+        });
+        el.addEventListener('mousemove', posicionarTooltip);
+        el.addEventListener('mouseleave', ocultarTooltipImagem);
+      });
+    };
+
+    // Vincula os botões de ação da tabela (Histórico, Editar, Excluir) e hover das imagens
+    const vincularAcoesTabela = () => {
+      vincularHoverProdutosTabela();
+      if (!isAdmin) return;
+
+      document.querySelectorAll('[data-history-prod]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          ocultarTooltipImagem();
+          produtoHistoricoId = btn.dataset.historyProd;
+          abaAtivaProdutos = 'historico';
+          if (refreshCallback) refreshCallback();
+        });
+      });
+
+      document.querySelectorAll('[data-edit-prod]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          ocultarTooltipImagem();
+          produtoEmEdicaoId = btn.dataset.editProd;
+          const prodAlvo = (Store.getCollection('produtos') || []).find(p => String(p.id) === String(produtoEmEdicaoId));
+          imagemEdicaoProdutoBase64 = prodAlvo?.imagem || '';
+          abaAtivaProdutos = 'editar';
+          if (refreshCallback) refreshCallback();
+        });
+      });
+
+      document.querySelectorAll('[data-delete-prod]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          ocultarTooltipImagem();
+          const id = btn.dataset.deleteProd;
+          Store.removeItem('produtos', id);
+          if (refreshCallback) refreshCallback();
+        });
+      });
+    };
+
+    // Atualiza a tabela em tempo real ao pesquisar/filtrar sem perder o foco do input
+    const aplicarFiltrosCatalogoEmTempoReal = () => {
+      const produtos = Store.getCollection('produtos') || [];
+      const todasMovimentacoes = isAdmin ? sincronizarMovimentacoesExternas(produtos) : [];
+      const produtosFiltrados = filtrarProdutosLista(produtos);
+      const temFiltroAtivo = Boolean(filtroBuscaProduto.trim() || filtroCategoriaProduto || filtroEstoqueProduto !== 'todos');
+
+      const tbody = document.getElementById('prod-table-body');
+      const titleEl = document.getElementById('prod-catalog-title');
+      const btnClearFilters = document.getElementById('btn-clear-prod-filters');
+
+      if (tbody) {
+        tbody.innerHTML = gerarLinhasTabelaProdutos(produtosFiltrados, produtos.length, isAdmin, todasMovimentacoes);
+        vincularAcoesTabela();
+      }
+
+      if (titleEl) {
+        titleEl.textContent = `Catálogo e Saldo de Estoque (${temFiltroAtivo ? `${produtosFiltrados.length} de ${produtos.length}` : produtos.length})`;
+      }
+
+      if (btnClearFilters) {
+        btnClearFilters.classList.toggle('hidden', !temFiltroAtivo);
+      }
+    };
+
+    const inpBusca = document.getElementById('prod-search-input');
+    const selFiltroCat = document.getElementById('prod-filter-categoria');
+    const selFiltroEstoque = document.getElementById('prod-filter-estoque');
+    const btnClearFilters = document.getElementById('btn-clear-prod-filters');
+
+    if (inpBusca) {
+      inpBusca.addEventListener('input', () => {
+        filtroBuscaProduto = inpBusca.value;
+        aplicarFiltrosCatalogoEmTempoReal();
+      });
+    }
+
+    if (selFiltroCat) {
+      selFiltroCat.addEventListener('change', () => {
+        filtroCategoriaProduto = selFiltroCat.value;
+        aplicarFiltrosCatalogoEmTempoReal();
+      });
+    }
+
+    if (selFiltroEstoque) {
+      selFiltroEstoque.addEventListener('change', () => {
+        filtroEstoqueProduto = selFiltroEstoque.value;
+        aplicarFiltrosCatalogoEmTempoReal();
+      });
+    }
+
+    if (btnClearFilters) {
+      btnClearFilters.addEventListener('click', () => {
+        filtroBuscaProduto = '';
+        filtroCategoriaProduto = '';
+        filtroEstoqueProduto = 'todos';
+        if (inpBusca) inpBusca.value = '';
+        if (selFiltroCat) selFiltroCat.value = '';
+        if (selFiltroEstoque) selFiltroEstoque.value = 'todos';
+        aplicarFiltrosCatalogoEmTempoReal();
+      });
+    }
+
+    vincularAcoesTabela();
+
     if (!isAdmin) return;
 
-    // Preenchimento automático bidirecional entre Margem de Lucro (%) e Preço de Venda (R$)
     configurarCalculoMargemVenda('p-custo', 'p-margem', 'p-venda');
     configurarCalculoMargemVenda('ep-custo', 'ep-margem', 'ep-venda');
 
-    // Lista suspensa de categorias + opção de criar nova categoria
     configurarSeletorCategoria('p');
     configurarSeletorCategoria('ep');
 
+    // Helper para upload + hover no campo Nome do Produto (usado tanto em Cadastrar quanto em Editar)
+    const configurarCampoImagemEHoverNome = ({
+      idInputFile,
+      idPreviewWrap,
+      idPreviewImg,
+      idBtnClear,
+      idWrapNome,
+      idInputNome,
+      idBadgeNome,
+      idMsgErro,
+      getBase64,
+      setBase64,
+      tituloFallback
+    }) => {
+      const inpFile = document.getElementById(idInputFile);
+      const wrapPreview = document.getElementById(idPreviewWrap);
+      const imgPreview = document.getElementById(idPreviewImg);
+      const btnClear = document.getElementById(idBtnClear);
+      const wrapNome = document.getElementById(idWrapNome);
+      const inpNome = document.getElementById(idInputNome);
+      const badgeNome = document.getElementById(idBadgeNome);
+      const msgErro = document.getElementById(idMsgErro);
+
+      const atualizarVisualCampoNome = () => {
+        const temImg = Boolean(getBase64());
+        if (badgeNome) badgeNome.classList.toggle('hidden', !temImg);
+        if (inpNome) {
+          inpNome.style.borderColor = temImg ? '#2563eb' : '';
+          inpNome.style.backgroundColor = temImg ? '#f8fafc' : '';
+        }
+      };
+
+      if (wrapNome) {
+        wrapNome.addEventListener('mouseenter', (e) => {
+          const base64Atual = getBase64();
+          if (!base64Atual) return;
+          const nomeDigitado = inpNome?.value.trim() || tituloFallback;
+          exibirTooltipImagem(base64Atual, nomeDigitado, e);
+        });
+        wrapNome.addEventListener('mousemove', posicionarTooltip);
+        wrapNome.addEventListener('mouseleave', ocultarTooltipImagem);
+      }
+
+      if (inpFile) {
+        inpFile.addEventListener('change', async () => {
+          const file = inpFile.files?.[0];
+          if (!file) {
+            setBase64('');
+            if (wrapPreview) {
+              wrapPreview.classList.add('hidden');
+              wrapPreview.style.display = 'none';
+            }
+            atualizarVisualCampoNome();
+            ocultarTooltipImagem();
+            return;
+          }
+
+          try {
+            const base64 = await processarImagemParaBase64(file);
+            setBase64(base64);
+            if (imgPreview) imgPreview.src = base64;
+            if (wrapPreview) {
+              wrapPreview.classList.remove('hidden');
+              wrapPreview.style.display = 'flex';
+            }
+            if (msgErro) msgErro.classList.add('hidden');
+            atualizarVisualCampoNome();
+          } catch (err) {
+            setBase64('');
+            inpFile.value = '';
+            atualizarVisualCampoNome();
+            if (msgErro) {
+              msgErro.textContent = err.message;
+              msgErro.classList.remove('hidden');
+            }
+          }
+        });
+      }
+
+      if (btnClear) {
+        btnClear.addEventListener('click', () => {
+          setBase64('');
+          if (inpFile) inpFile.value = '';
+          if (imgPreview) imgPreview.src = '';
+          if (wrapPreview) {
+            wrapPreview.classList.add('hidden');
+            wrapPreview.style.display = 'none';
+          }
+          atualizarVisualCampoNome();
+          ocultarTooltipImagem();
+        });
+      }
+    };
+
+    configurarCampoImagemEHoverNome({
+      idInputFile: 'p-imagem',
+      idPreviewWrap: 'p-imagem-preview-wrap',
+      idPreviewImg: 'p-imagem-preview',
+      idBtnClear: 'btn-clear-new-img',
+      idWrapNome: 'wrap-p-nome',
+      idInputNome: 'p-nome',
+      idBadgeNome: 'p-nome-img-badge',
+      idMsgErro: 'prod-msg',
+      getBase64: () => imagemNovaProdutoBase64,
+      setBase64: (val) => { imagemNovaProdutoBase64 = val; },
+      tituloFallback: 'Novo Produto'
+    });
+
+    configurarCampoImagemEHoverNome({
+      idInputFile: 'ep-imagem',
+      idPreviewWrap: 'ep-imagem-preview-wrap',
+      idPreviewImg: 'ep-imagem-preview',
+      idBtnClear: 'btn-clear-edit-img',
+      idWrapNome: 'wrap-ep-nome',
+      idInputNome: 'ep-nome',
+      idBadgeNome: 'ep-nome-img-badge',
+      idMsgErro: 'edit-prod-msg',
+      getBase64: () => imagemEdicaoProdutoBase64,
+      setBase64: (val) => { imagemEdicaoProdutoBase64 = val; },
+      tituloFallback: 'Produto em Edição'
+    });
+
     document.querySelectorAll('[data-prod-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
+        ocultarTooltipImagem();
         abaAtivaProdutos = btn.dataset.prodTab;
         produtoEmEdicaoId = null;
         produtoHistoricoId = null;
+        imagemNovaProdutoBase64 = '';
+        imagemEdicaoProdutoBase64 = '';
         if (refreshCallback) refreshCallback();
       });
     });
 
-    // Abrir histórico de movimentações do produto
-    document.querySelectorAll('[data-history-prod]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        produtoHistoricoId = btn.dataset.historyProd;
-        abaAtivaProdutos = 'historico';
-        if (refreshCallback) refreshCallback();
-      });
-    });
-
-    // Voltar do histórico para o catálogo
     const btnBackCatalog = document.getElementById('btn-back-catalog');
     if (btnBackCatalog) {
       btnBackCatalog.addEventListener('click', () => {
@@ -841,7 +1305,6 @@ export const ProdutosModule = {
       });
     }
 
-    // Limpar histórico de movimentações (somente Administrador)
     const btnClearHistory = document.getElementById('btn-clear-prod-history');
     const modalClearHistory = document.getElementById('clear-history-confirm-modal');
     const btnCancelClearHistory = document.getElementById('btn-cancel-clear-history');
@@ -885,26 +1348,17 @@ export const ProdutosModule = {
       });
     }
 
-    // Abrir edição do produto
-    document.querySelectorAll('[data-edit-prod]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        produtoEmEdicaoId = btn.dataset.editProd;
-        abaAtivaProdutos = 'editar';
-        if (refreshCallback) refreshCallback();
-      });
-    });
-
-    // Cancelar edição
     const btnCancelEdit = document.getElementById('btn-cancel-edit-prod');
     if (btnCancelEdit) {
       btnCancelEdit.addEventListener('click', () => {
+        ocultarTooltipImagem();
         produtoEmEdicaoId = null;
+        imagemEdicaoProdutoBase64 = '';
         abaAtivaProdutos = 'catalogo';
         if (refreshCallback) refreshCallback();
       });
     }
 
-    // Salvar edição do produto (registra no histórico se houver alteração de estoque)
     const editForm = document.getElementById('edit-product-form');
     if (editForm && produtoEmEdicaoId) {
       editForm.addEventListener('submit', (e) => {
@@ -925,7 +1379,8 @@ export const ProdutosModule = {
           categoria,
           custo,
           venda,
-          estoque: estoqueNovo
+          estoque: estoqueNovo,
+          imagem: imagemEdicaoProdutoBase64 || ''
         });
 
         if (prodAnterior && Number(prodAnterior.estoque) !== estoqueNovo) {
@@ -943,7 +1398,9 @@ export const ProdutosModule = {
           });
         }
 
+        ocultarTooltipImagem();
         produtoEmEdicaoId = null;
+        imagemEdicaoProdutoBase64 = '';
         abaAtivaProdutos = 'catalogo';
         if (refreshCallback) refreshCallback();
       });
@@ -963,7 +1420,15 @@ export const ProdutosModule = {
 
         if (!categoria) return;
 
-        Store.addItem('produtos', { sku, nome, categoria, custo, venda, estoque });
+        Store.addItem('produtos', {
+          sku,
+          nome,
+          categoria,
+          custo,
+          venda,
+          estoque,
+          imagem: imagemNovaProdutoBase64 || ''
+        });
 
         const prodCriado = (Store.getCollection('produtos') || []).find(p => p.sku === sku && p.nome === nome);
         if (prodCriado) {
@@ -980,6 +1445,8 @@ export const ProdutosModule = {
           });
         }
 
+        ocultarTooltipImagem();
+        imagemNovaProdutoBase64 = '';
         abaAtivaProdutos = 'catalogo';
         if (refreshCallback) refreshCallback();
       });
@@ -1033,13 +1500,5 @@ export const ProdutosModule = {
         if (refreshCallback) refreshCallback();
       });
     }
-
-    document.querySelectorAll('[data-delete-prod]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.deleteProd;
-        Store.removeItem('produtos', id);
-        if (refreshCallback) refreshCallback();
-      });
-    });
   }
 };
